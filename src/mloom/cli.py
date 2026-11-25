@@ -126,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
 def _print_summary(result: Result) -> None:
     scores = result.cv_scores
     print(
-        f"{result.config.metric_name}: {scores['mean']:.4g} +/- {scores['std']:.4g}"
+        f"{result.config.metric_name}: {scores['mean']:.4g} +/- {scores['std']:.4g} "
         f"({len(scores['folds'])} folds); "
         f"{len(result.selected_columns)} of {len(result.columns.candidates)} candidate columns selected; "
         f"{len(result.columns.excluded)} columns excluded",
