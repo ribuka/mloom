@@ -29,8 +29,8 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | API の形 | `optimize_model(data, config)` が学習済み Pipeline と評価結果を返し、`result.save(output_dir)` で `model.pkl` と `run.json` を保存する | 同上 |
 | データの渡し方 | API には Parquet のパス、または Polars の DataFrame を渡せる。CLI には Parquet のパスを渡す | 同上 |
 | 無限大 | 目的変数か、説明変数になりうる列に +inf・-inf がある行は、行ごと学習から外す（2026-11-26 ユーザー判断） | 欠損として補完すると、センサの異常値を「中央値」として学習に混ぜてしまうため |
-| 欠損率のしきい値 | 説明変数を除外する欠損率のしきい値を、利用側リポジトリの `config/settings.toml` で変えられる（2026-11-26 ユーザー判断） | データによって適したしきい値が違うため |
-| 目的変数が欠損した行 | 説明変数だけから計算する統計量（補完の中央値、標準化の平均・標準偏差）に、目的変数が欠損した行も使う。欠損率は「目的変数がある行」と「全行」の両方で見て、どちらかがしきい値を超えたら除外する。`config/settings.toml` で使わないようにも切り替えられる（既定は使う）（2026-11-26 ユーザー判断） | ソフトセンサのように分析値がまばらなデータでは、統計量が安定するため。欠損率は、学習で実際の値から学べる量（目的変数がある行）と、予測時に補完に頼る量（全行）の両方を満たす列だけを残すため。非定常運転などで使いたくないデータもあるので切り替えられるようにする |
+| 欠損率のしきい値 | 説明変数を除外する欠損率のしきい値を、利用側リポジトリの `config/mloom.toml` で変えられる（2026-11-26 ユーザー判断。「設定ファイル」） | データによって適したしきい値が違うため |
+| 目的変数が欠損した行 | 説明変数だけから計算する統計量（補完の中央値、標準化の平均・標準偏差）に、目的変数が欠損した行も使う。欠損率は「目的変数がある行」と「全行」の両方で見て、どちらかがしきい値を超えたら除外する。`config/mloom.toml` で使わないようにも切り替えられる（既定は使う）（2026-11-26 ユーザー判断） | ソフトセンサのように分析値がまばらなデータでは、統計量が安定するため。欠損率は、学習で実際の値から学べる量（目的変数がある行）と、予測時に補完に頼る量（全行）の両方を満たす列だけを残すため。非定常運転などで使いたくないデータもあるので切り替えられるようにする |
 
 ### スコープ外
 
@@ -78,7 +78,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | `metric` | | `task` ごとの既定 | 評価指標。回帰は `rmse`（既定）、`mae`、`r2`。分類は `log_loss`（既定）、`accuracy`、`f1_macro`、`roc_auc`（2 値のみ） |
 | `exclude_columns` | | `[]` | 説明変数から外す列（ID 列など） |
 | `unavailable_sensors` | | `config/unavailable-sensors.json` | 使えないセンサの定義ファイル。カレントディレクトリからの相対パス |
-| `settings` | | `config/settings.toml` | 処理の調整値のファイル（下の「設定ファイル」）。カレントディレクトリからの相対パス |
+| `settings` | | `config/mloom.toml` | 利用側の設定ファイル（下の「設定ファイル」）。カレントディレクトリからの相対パス。`None` なら mloom 側の既定値だけを読む |
 | `n_trials` | | 100 | HPO の試行数 |
 | `timeout` | | なし | HPO の打ち切り時間（秒） |
 | `seed` | | 0 | 乱数の種。CV の分割、Optuna の sampler、モデルに渡す |
@@ -108,9 +108,27 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 - 照合は列名の完全一致（案）。1 つのセンサから複数の列がある場合（`TI-101_mean` など）の照合は「未決事項」。
 
-### 設定ファイル（`config/settings.toml`）
+### 設定ファイル（`config/mloom.toml`）
 
-決定事項: 処理の調整値を、利用側リポジトリの `config/settings.toml` で変えられる（2026-11-26 ユーザー判断）。
+決定事項（2026-11-26 ユーザー判断）:
+
+- 処理の調整値を、利用側リポジトリの `config/mloom.toml` で変えられる。利用側の `config/settings.toml` などと衝突しないように、ファイル名に `mloom` を入れる。
+- 利用側で定義されていないキーは、mloom リポジトリ（Skill 側）の `config/mloom.local.toml`、`config/mloom.toml` の順に探す。`config/mloom.local.toml` は git 対象外。
+
+読む順（上ほど優先。キーごとに、最初に見つかった値を使う）:
+
+| 順 | ファイル | 役割（`run.json` の `settings.files[].role`） | 読む条件 |
+| --- | --- | --- | --- |
+| 1 | 利用側の `config/mloom.toml`（実行時のカレントディレクトリから。`--settings` で別のファイルも指定できる） | `project` | 常に |
+| 2 | mloom リポジトリの `config/mloom.local.toml`（git 対象外） | `local_defaults` | mloom を clone から実行したとき |
+| 3 | mloom リポジトリの `config/mloom.toml` | `defaults` | 常に。clone が無いとき（wheel から入れたとき）は、wheel に同梱した写し（`mloom/defaults.toml`）を読む |
+
+- 既定値は 3 のファイルだけに書く。コードには既定値を持たない（2 か所に書くと食い違うため）。3 のファイルにすべてのキーが無ければエラーで止める（終了コード 1）。
+- 「clone から実行した」かどうかは、読み込んだ mloom パッケージが `<リポジトリ>/src/mloom` にあり、`<リポジトリ>/config/mloom.toml` があることで判定する。
+- 2 は、その PC だけの既定値（例: 扱うデータの傾向に合わせたしきい値）を、利用側の各リポジトリに書かずに変えるためのもの。
+- `config/unavailable-sensors.json` は名前を変えない。中身は mloom の設定ではなくプラントの事実で、他の分析やツールからも読めるように汎用の名前にしておく。
+
+キー（3 のファイルの内容）:
 
 ```toml
 [columns]
@@ -122,16 +140,13 @@ max_missing_rate = 0.5
 use_unlabeled_rows = true
 ```
 
-- このファイルは mloom 本体ではなく、**mloom を使う側のリポジトリ**に置く（実行時のカレントディレクトリの `config/settings.toml`）。`unavailable-sensors.json` と同じ。
-
 | 状況 | 扱い |
 | --- | --- |
-| ファイルが無い | すべて既定値で続ける。`run.json` の `settings.found` が `false` になる |
-| キーが無い | そのキーだけ既定値 |
-| TOML として読めない、知らない表やキーがある、値が範囲外 | エラーで止める（終了コード 2）。打ち間違いで黙って既定値になるのを防ぐため |
+| 1 や 2 のファイルが無い | 無視して次を探す。`run.json` の `settings.files[].found` が `false` になる |
+| キーが無い | 次のファイルを探す |
+| どのファイルでも、TOML として読めない、知らない表やキーがある、値が範囲外 | エラーで止める（終了コード 2）。打ち間違いで黙って既定値になるのを防ぐため |
 
-- 使った値は `run.json` の `settings` に残す。
-- 例は `examples/settings.toml`。
+- 使った値と、各キーを読んだファイルを `run.json` の `settings` に残す（`sources`）。
 
 ## 処理の流れ
 
@@ -177,7 +192,7 @@ use_unlabeled_rows = true
 | `non_numeric` | 数値でも真偽値でもない列（案）。真偽値は 0/1 の数値として扱う |
 | `all_null` | すべて欠損の列 |
 | `constant` | 欠損を除いて値が 1 種類の列 |
-| `high_missing` | 「目的変数がある行での欠損率」か「目的変数が欠損した行も含めた全行での欠損率」のどちらかが、`config/settings.toml` の `max_missing_rate`（既定 0.5）を超える列。`detail` に両方の欠損率を残す |
+| `high_missing` | 「目的変数がある行での欠損率」か「目的変数が欠損した行も含めた全行での欠損率」のどちらかが、設定ファイルの `max_missing_rate`（既定 0.5）を超える列。`detail` に両方の欠損率を残す |
 
 - 浮動小数の列の NaN は欠損として扱う。
 - 欠損率は「行の除外」の後の行で計算する。`use_unlabeled_rows` が false なら、2 つの欠損率は同じになる。
@@ -285,7 +300,15 @@ use_unlabeled_rows = true
     "sensors": {"TI-101": "2026-10 から故障中", "FI-205": "廃止"},
     "not_in_data": ["FI-205"]
   },
-  "settings": {"path": "config/settings.toml", "found": true, "max_missing_rate": 0.5, "use_unlabeled_rows": true},
+  "settings": {
+    "max_missing_rate": 0.3, "use_unlabeled_rows": true,
+    "sources": {"max_missing_rate": "config/mloom.toml", "use_unlabeled_rows": "C:/.../mloom/config/mloom.toml"},
+    "files": [
+      {"role": "project", "path": "config/mloom.toml", "found": true},
+      {"role": "local_defaults", "path": "C:/.../mloom/config/mloom.local.toml", "found": false},
+      {"role": "defaults", "path": "C:/.../mloom/config/mloom.toml", "found": true}
+    ]
+  },
   "excluded_columns": [
     {"name": "timestamp", "reason": "role", "detail": null},
     {"name": "TI-101", "reason": "unavailable_sensor", "detail": "2026-10 から故障中"},
@@ -341,7 +364,7 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | --- | --- |
 | 0 | 成功。`model.pkl` と `run.json` を保存した |
 | 1 | 想定外のエラー |
-| 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`、`settings.toml`） |
+| 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`、`mloom.toml`） |
 
 ## Skill
 
@@ -381,7 +404,7 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | `mloom.models` | モデルのレジストリ（推定器、標準化の要否、探索空間） |
 | `mloom.data` | データの読み込み |
 | `mloom.sensors` | `unavailable-sensors.json` の読み込み |
-| `mloom.settings` | `settings.toml` の読み込み |
+| `mloom.settings` | 設定ファイル（`mloom.toml`）とその既定値の読み込み |
 | `mloom.rows` | 学習に使う行の選択（目的変数の欠損、無限大） |
 | `mloom.columns` | 列の除外と理由の記録 |
 | `mloom.cv` | ユーザーが指定した CV の分割 |

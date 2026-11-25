@@ -125,7 +125,7 @@ class Result:
                 "sensors": self.sensors.reasons,
                 "not_in_data": self.columns.sensors_not_in_data,
             },
-            "settings": vars(self.settings),
+            "settings": self.settings.to_dict(),
             "excluded_columns": [vars(column) for column in self.columns.excluded],
             "candidate_columns": self.columns.candidates,
             "selected_columns": self.selected_columns,

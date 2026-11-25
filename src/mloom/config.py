@@ -10,7 +10,7 @@ from mloom.models import MODELS, ModelSpec
 TASKS: tuple[str, ...] = ("regression", "classification")
 CV_METHODS: tuple[str, ...] = ("timeseries", "group", "kfold")
 DEFAULT_UNAVAILABLE_SENSORS = Path("config/unavailable-sensors.json")
-DEFAULT_SETTINGS = Path("config/settings.toml")
+DEFAULT_SETTINGS = Path("config/mloom.toml")
 
 
 @dataclass(frozen=True)
@@ -41,8 +41,8 @@ class Config:
         JSON file of the sensors that must not be used, relative to the
         current directory. ``None`` reads no file.
     settings : Path | None
-        TOML file of the tunable values (``mloom.settings``), relative to the
-        current directory. ``None`` reads no file and uses the defaults.
+        Project settings file (``mloom.settings``), relative to the
+        current directory. ``None`` reads only the defaults of mloom.
     n_trials : int
         Number of trials of the hyperparameter search.
     timeout : float | None

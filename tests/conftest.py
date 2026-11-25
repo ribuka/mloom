@@ -1,6 +1,8 @@
 """Shared fixtures: a small synthetic data set and a fast config."""
 
+import shutil
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -8,9 +10,24 @@ import optuna
 import polars as pl
 import pytest
 
+import mloom.settings
 from mloom.config import Config
+from mloom.settings import SETTINGS_FILE
 
 N_ROWS = 120
+
+
+@pytest.fixture(autouse=True)
+def mloom_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Read the defaults from a copy of config/mloom.toml, never from config/mloom.local.toml.
+
+    A developer's local defaults must not change the tests. Return the directory
+    of the copy, where a test may write a local defaults file.
+    """
+    directory = tmp_path_factory.mktemp("mloom-config")
+    shutil.copy(Path(__file__).parents[1] / "config" / SETTINGS_FILE, directory / SETTINGS_FILE)
+    monkeypatch.setattr(mloom.settings, "mloom_config_dir", lambda: directory)
+    return directory
 
 
 @pytest.fixture(autouse=True)

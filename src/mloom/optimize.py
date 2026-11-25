@@ -47,7 +47,7 @@ def optimize_model(data: Data, config: Config) -> Result:
     Raises
     ------
     InputError
-        When the data, ``unavailable-sensors.json`` or ``settings.toml`` is
+        When the data, ``unavailable-sensors.json`` or ``mloom.toml`` is
         invalid or does not fit the config.
         Raised before any model is fitted.
     OptimizationError

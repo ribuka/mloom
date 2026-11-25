@@ -112,7 +112,7 @@ def test_unlabeled_rows_join_the_preprocessing(
     # Unlabeled rows far from the labeled ones move the statistics a lot.
     unlabeled = frame.head(30).with_columns(y=pl.lit(None, dtype=pl.Float64), s0=pl.col("s0") + 100.0)
     data = pl.concat([frame, unlabeled])
-    settings = tmp_path / "settings.toml"
+    settings = tmp_path / "mloom.toml"
     settings.write_text(f"[preprocessing]\nuse_unlabeled_rows = {str(use_unlabeled).lower()}\n", encoding="utf-8")
     result = optimize_model(data, make_config(model="pls", settings=settings))
 
@@ -129,14 +129,15 @@ def test_unlabeled_rows_join_the_preprocessing(
 def test_max_missing_rate_comes_from_settings(
     frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, rate: float, excluded: bool
 ) -> None:
-    """``max_missing_rate`` in ``settings.toml`` decides whether a column with 25% missing is excluded."""
+    """``max_missing_rate`` in the project settings decides whether a column with 25% missing is excluded."""
     data = frame.with_columns(s2=pl.when(pl.col("t") % 4 == 0).then(None).otherwise(pl.col("s2")))
-    settings = tmp_path / "settings.toml"
+    settings = tmp_path / "mloom.toml"
     settings.write_text(f"[columns]\nmax_missing_rate = {rate}\n", encoding="utf-8")
     run = optimize_model(data, make_config(settings=settings)).to_dict()
     high_missing = {"name": "s2", "reason": "high_missing", "detail": "labeled 0.250, all 0.250"}
     assert (high_missing in run["excluded_columns"]) is excluded
-    assert run["settings"] == {"path": str(settings), "found": True, "max_missing_rate": rate, "use_unlabeled_rows": True}
+    assert run["settings"]["max_missing_rate"] == rate
+    assert run["settings"]["sources"]["max_missing_rate"] == str(settings)
 
 
 @pytest.mark.parametrize(

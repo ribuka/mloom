@@ -38,6 +38,12 @@ pattern = '^(?P<version>\S+)\s*$'
 [tool.hatch.build.targets.wheel]
 packages = ["src/mloom"]
 
+# The defaults of the settings, for an installation without a clone (mloom.settings).
+# An editable install also gets site-packages/mloom/defaults.toml; it is harmless (the
+# package in src wins the import, and a clone reads config/mloom.toml directly).
+[tool.hatch.build.targets.wheel.force-include]
+"config/mloom.toml" = "mloom/defaults.toml"
+
 [tool.uv]
 # The version comes from VERSION, so a change to it reinstalls the package.
 cache-keys = [{ file = "pyproject.toml" }, { file = "VERSION" }]

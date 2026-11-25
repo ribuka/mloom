@@ -64,7 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--settings",
         type=Path,
         default=DEFAULT_SETTINGS,
-        help=f"TOML of tunable values such as max_missing_rate (default: {DEFAULT_SETTINGS})",
+        help=(
+            f"project settings such as max_missing_rate (default: {DEFAULT_SETTINGS}); "
+            "keys it does not set come from the defaults of mloom"
+        ),
     )
     optimize.add_argument("--n-trials", type=int, default=100)
     optimize.add_argument("--timeout", type=float, help="seconds")

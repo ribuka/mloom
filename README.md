@@ -15,8 +15,15 @@ uv run mloom optimize data/sample.parquet --target quality --task regression --m
 
 - `outputs/quality-lightgbm/` に `model.pkl` と `run.json` ができます。
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
-- 同じく `--settings` を省くと `config/settings.toml` を読みます（無ければ既定値）。欠損率のしきい値 `max_missing_rate` と、目的変数が欠損した行を統計量に使うか `use_unlabeled_rows` を変えられます。例は [examples/settings.toml](examples/settings.toml) です。
-- `unavailable-sensors.json` と `settings.toml` は、mloom ではなく mloom を使う側のリポジトリの `config/` に置きます。
+- 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値 `max_missing_rate` と、目的変数が欠損した行を統計量に使うか `use_unlabeled_rows` を変えられます。
+- `unavailable-sensors.json` と `mloom.toml` は、mloom を使う側のリポジトリの `config/` に置きます。
+
+## 設定の既定値
+
+使う側の `config/mloom.toml` に無いキーは、mloom リポジトリの次のファイルから読みます（上ほど優先）。
+
+1. `config/mloom.local.toml`: その PC だけの既定値。git 対象外です。mloom を clone から実行したときだけ読みます。
+2. [config/mloom.toml](config/mloom.toml): すべてのキーの既定値と説明。wheel にも同梱されます。
 - 目的変数が欠損している行は学習と評価から外します。ただし既定では、欠損率と、補完の中央値・標準化の平均と標準偏差の計算には使います。
 - 無限大（+inf・-inf）がある行は外し、行数を `run.json` の `data` に残します。
 - 分類は `--target grade --task classification --exclude-columns quality`、Group の CV は `--cv group --group-column lot` です。

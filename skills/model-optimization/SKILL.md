@@ -24,7 +24,7 @@ them.
 - NEVER choose the CV method yourself. The right split depends on how the model will be used (future data → `timeseries`, unseen lots → `group`), which the data does not tell.
   - When you already know the columns (from the conversation or the user's code), use them to make the question concrete, such as "`timestamp` があります。将来のデータを予測する用途なら `timeseries` にしますか？".
 - Optional arguments, only when the user asks for them: `--metric`, `--n-splits` (default 5), `--exclude-columns`, `--n-trials` (default 100), `--timeout` (seconds), `--seed` (default 0), `--unavailable-sensors`, `--settings`.
-- `config/settings.toml` of the user's repository holds `max_missing_rate` (threshold of column exclusion) and `use_unlabeled_rows` (whether rows without a target join the imputation and scaling statistics). Do not edit it unless the user asks.
+- `config/mloom.toml` of the user's repository holds `max_missing_rate` (threshold of column exclusion) and `use_unlabeled_rows` (whether rows without a target join the imputation and scaling statistics). Keys it does not set come from `config/mloom.local.toml` and then `config/mloom.toml` of the mloom repository (this skill's repository). Do not edit any of them unless the user asks; `run.json` → `settings.sources` tells which file each value came from.
 - Choose `--output` as `outputs/<target>-<model>-<cv>` unless the user names a directory. Tell the user that an existing `model.pkl` and `run.json` there are overwritten.
 
 ## 2. Run

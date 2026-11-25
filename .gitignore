@@ -25,6 +25,9 @@ wheels/
 # tmp
 /tmp/
 
+# defaults of the settings for one machine (see config/mloom.toml)
+/config/mloom.local.toml
+
 # data
 /data/
 

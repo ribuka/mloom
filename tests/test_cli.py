@@ -40,7 +40,7 @@ def test_optimize_saves_and_prints_run_json(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "unavailable-sensors.json").write_text('{"sensors": [{"name": "s0"}]}', encoding="utf-8")
-    (tmp_path / "config" / "settings.toml").write_text("[columns]\nmax_missing_rate = 0.3\n", encoding="utf-8")
+    (tmp_path / "config" / "mloom.toml").write_text("[columns]\nmax_missing_rate = 0.3\n", encoding="utf-8")
     output = tmp_path / "out"
 
     assert main(_args(data_path, output)) == EXIT_OK
@@ -48,7 +48,7 @@ def test_optimize_saves_and_prints_run_json(
     run_path = Path(capsys.readouterr().out.strip().splitlines()[-1])
     assert run_path == output / "run.json"
     assert (output / "model.pkl").is_file()
-    # The default unavailable-sensors.json and settings.toml are read from the current directory.
+    # The default unavailable-sensors.json and mloom.toml are read from the current directory.
     run = json.loads(run_path.read_text(encoding="utf-8"))
     assert run["unavailable_sensors"]["found"]
     assert "s0" not in run["candidate_columns"]
