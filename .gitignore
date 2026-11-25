@@ -8,3 +8,35 @@ wheels/
 
 # Virtual environments
 .venv
+.uv-cache/
+
+# cache
+.pytest_cache/
+.ruff_cache/
+
+# local credentials and agent configuration
+.env
+.env.*
+!.env.example
+.codex/
+.claude/*
+!.claude/settings.json
+
+# tmp
+/tmp/
+
+# data
+/data/
+
+# notebooks
+/notebooks/
+
+# outputs of optimize_model (model.pkl, run.json)
+/outputs/
+
+# logs
+/logs/
+*.log
+
+# lnk
+*.lnk
