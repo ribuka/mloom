@@ -81,20 +81,27 @@ def check_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSenso
 
 
 def plan_columns(
-    frame: pl.DataFrame, config: Config, sensors: UnavailableSensors, max_missing_rate: float
+    frame: pl.DataFrame,
+    unlabeled: pl.DataFrame,
+    config: Config,
+    sensors: UnavailableSensors,
+    max_missing_rate: float,
 ) -> ColumnPlan:
     """Decide the feature candidates.
 
     Parameters
     ----------
     frame : pl.DataFrame
-        The training rows (``mloom.rows.select_rows``).
+        The labeled rows (``mloom.rows.TrainingRows.labeled``).
+    unlabeled : pl.DataFrame
+        The unlabeled rows used for statistics (may be empty).
     config : Config
         The config of the run.
     sensors : UnavailableSensors
         The unavailable sensors.
     max_missing_rate : float
-        A column whose missing rate is above this is excluded as
+        A column whose missing rate is above this, in the labeled rows or in
+        the labeled and unlabeled rows together, is excluded as
         ``high_missing``.
 
     Returns
@@ -110,7 +117,7 @@ def plan_columns(
     candidates: list[str] = []
     excluded: list[ExcludedColumn] = []
     for name in frame.columns:
-        reason = name_reason(name, config, sensors) or _value_reason(frame, name, max_missing_rate)
+        reason = name_reason(name, config, sensors) or _value_reason(frame, unlabeled, name, max_missing_rate)
         if reason is None:
             candidates.append(name)
         else:
@@ -149,7 +156,10 @@ def name_reason(name: str, config: Config, sensors: UnavailableSensors) -> Exclu
     return None
 
 
-def _value_reason(frame: pl.DataFrame, name: str, max_missing_rate: float) -> ExcludedColumn | None:
+def _value_reason(
+    frame: pl.DataFrame, unlabeled: pl.DataFrame, name: str, max_missing_rate: float
+) -> ExcludedColumn | None:
+    # all_null and constant look at the labeled rows: the model learns from them only.
     dtype = frame.schema[name]
     if not (dtype.is_numeric() or dtype == pl.Boolean):
         return ExcludedColumn(name, "non_numeric", str(dtype))
@@ -159,8 +169,10 @@ def _value_reason(frame: pl.DataFrame, name: str, max_missing_rate: float) -> Ex
         return ExcludedColumn(name, "all_null")
     if values.drop_nulls().n_unique() == 1:
         return ExcludedColumn(name, "constant")
-    rate = n_missing / frame.height
-    if rate > max_missing_rate:
-        return ExcludedColumn(name, "high_missing", f"{rate:.3f}")
+    labeled_rate = n_missing / frame.height
+    n_missing_all = n_missing + unlabeled.select(as_float(name).null_count()).item()
+    all_rate = n_missing_all / (frame.height + unlabeled.height)
+    if max(labeled_rate, all_rate) > max_missing_rate:
+        return ExcludedColumn(name, "high_missing", f"labeled {labeled_rate:.3f}, all {all_rate:.3f}")
     return None
 

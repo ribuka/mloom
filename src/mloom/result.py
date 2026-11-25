@@ -34,6 +34,8 @@ class DataSummary:
         Columns of the input.
     n_rows_used : int
         Rows used for training.
+    n_unlabeled_rows_used : int
+        Rows without a target used for the statistics of the features.
     n_rows_without_target : int
         Rows dropped because the target is missing.
     n_rows_with_infinite : int
@@ -46,6 +48,7 @@ class DataSummary:
     n_rows: int
     n_columns: int
     n_rows_used: int
+    n_unlabeled_rows_used: int
     n_rows_without_target: int
     n_rows_with_infinite: int
     infinite_by_column: dict[str, int]

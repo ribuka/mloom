@@ -1,9 +1,13 @@
 """Building the scikit-learn Pipeline that is tuned, fitted, and pickled.
 
 The steps are: column selection (``ColumnSelector``, only in the saved
-pipeline) → imputation → standardization (for some models) → feature
-selection (``SelectKBest``) → the estimator. Every supervised step sits
-inside the pipeline, so CV fits it on the training folds only.
+pipeline) → preprocessing (imputation, and standardization for some models)
+→ feature selection (``SelectKBest``) → the estimator.
+
+The preprocessing uses no target, so it is fitted beforehand on the rows the
+statistics come from (which may include unlabeled rows) and frozen. The
+feature selection and the estimator are fitted with the pipeline, so CV fits
+them on the training folds only.
 """
 
 from typing import Any
@@ -12,6 +16,7 @@ import numpy as np
 import polars as pl
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_selection import SelectKBest, f_classif, f_regression
+from sklearn.frozen import FrozenEstimator
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -115,40 +120,32 @@ class ColumnSelector(TransformerMixin, BaseEstimator):
         return True
 
 
-def _model_steps(config: Config, params: Params, k: int) -> list[tuple[str, Any]]:
-    """Build the unfitted steps that follow the column selection.
+def fit_preprocess(config: Config, x: np.ndarray) -> Pipeline:
+    """Fit the imputation (and the standardization, for some models).
 
     Parameters
     ----------
     config : Config
         The config of the run.
-    params : Params
-        Hyperparameters of the model.
-    k : int
-        Number of features ``SelectKBest`` keeps.
+    x : np.ndarray
+        Feature matrix of the rows the statistics come from: the labeled
+        training rows and the unlabeled rows on the training side.
 
     Returns
     -------
-    list[tuple[str, Any]]
-        Named pipeline steps.
+    Pipeline
+        The fitted preprocessing.
     """
-    spec = config.model_spec
-    if "n_components" in params:
-        # PLS cannot have more components than features.
-        params = {**params, "n_components": min(params["n_components"], k)}
-    score_func = f_regression if config.task == "regression" else f_classif
-    steps: list[tuple[str, Any]] = [
-        ("impute", SimpleImputer(strategy="median", keep_empty_features=True)),
-    ]
-    if spec.scale:
+    steps: list[tuple[str, Any]] = [("impute", SimpleImputer(strategy="median", keep_empty_features=True))]
+    if config.model_spec.scale:
         steps.append(("scale", StandardScaler()))
-    steps.append(("select", SelectKBest(score_func=score_func, k=k)))
-    steps.append(("model", spec.build(config.task, params, config.seed)))
-    return steps
+    return Pipeline(steps).fit(x)
 
 
-def build_pipeline(config: Config, params: Params, k: int, columns: list[str] | None = None) -> Pipeline:
-    """Build an unfitted pipeline.
+def build_pipeline(
+    config: Config, params: Params, k: int, preprocess: Pipeline, columns: list[str] | None = None
+) -> Pipeline:
+    """Build a pipeline whose preprocessing is already fitted.
 
     Parameters
     ----------
@@ -158,6 +155,9 @@ def build_pipeline(config: Config, params: Params, k: int, columns: list[str] | 
         Hyperparameters of the model.
     k : int
         Number of features ``SelectKBest`` keeps.
+    preprocess : Pipeline
+        Fitted preprocessing from ``fit_preprocess``. It is frozen: fitting
+        the pipeline fits only the feature selection and the model.
     columns : list[str] | None
         Feature columns. When given, the pipeline starts with a
         ``ColumnSelector`` and takes a table; otherwise it takes a matrix.
@@ -167,7 +167,15 @@ def build_pipeline(config: Config, params: Params, k: int, columns: list[str] | 
     Pipeline
         The pipeline.
     """
-    steps = _model_steps(config, params, k)
+    if "n_components" in params:
+        # PLS cannot have more components than features.
+        params = {**params, "n_components": min(params["n_components"], k)}
+    score_func = f_regression if config.task == "regression" else f_classif
+    steps: list[tuple[str, Any]] = [
+        ("preprocess", FrozenEstimator(preprocess)),
+        ("select", SelectKBest(score_func=score_func, k=k)),
+        ("model", config.model_spec.build(config.task, params, config.seed)),
+    ]
     if columns is not None:
         steps.insert(0, ("columns", ColumnSelector(columns)))
     return Pipeline(steps)

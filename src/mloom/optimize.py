@@ -3,13 +3,15 @@
 See "処理の流れ" in ``docs/spec.md``.
 """
 
+import warnings
 from datetime import datetime
 from typing import Any
 
 import numpy as np
 import optuna
 import polars as pl
-from sklearn.model_selection import cross_validate
+from sklearn.metrics import get_scorer
+from sklearn.pipeline import Pipeline
 
 from mloom.columns import check_columns, plan_columns
 from mloom.config import Config
@@ -17,7 +19,7 @@ from mloom.cv import CVPlan, order_rows, plan_cv
 from mloom.data import Data, load_data
 from mloom.errors import InputError, OptimizationError
 from mloom.metrics import BINARY_ONLY_METRICS
-from mloom.pipeline import as_float, build_pipeline, to_matrix
+from mloom.pipeline import as_float, build_pipeline, fit_preprocess, to_matrix
 from mloom.result import DataSummary, Result
 from mloom.rows import select_rows
 from mloom.sensors import load_unavailable_sensors
@@ -55,16 +57,19 @@ def optimize_model(data: Data, config: Config) -> Result:
     sensors = load_unavailable_sensors(config.unavailable_sensors)
     settings = load_settings(config.settings)
     check_columns(frame, config, sensors)
-    training = select_rows(frame, config, sensors)
-    rows = order_rows(training.frame, config)
+    training = select_rows(frame, config, sensors, use_unlabeled=settings.use_unlabeled_rows)
+    rows = order_rows(training.labeled, config)
     y = _target(rows, config)
-    columns = plan_columns(rows, config, sensors, settings.max_missing_rate)
-    cv_plan = plan_cv(rows, y, config)
+    columns = plan_columns(rows, training.unlabeled, config, sensors, settings.max_missing_rate)
+    cv_plan = plan_cv(rows, y, training.unlabeled, config)
+    x = to_matrix(rows, columns.candidates)
+    x_unlabeled = to_matrix(training.unlabeled, columns.candidates)
 
-    study = _search(config, to_matrix(rows, columns.candidates), y, cv_plan)
+    study = _search(config, x, y, x_unlabeled, cv_plan)
     best = study.best_trial
     params = {name: value for name, value in best.params.items() if name != K_PARAM}
-    pipeline = build_pipeline(config, params, best.params[K_PARAM], columns.candidates)
+    preprocess = fit_preprocess(config, np.vstack([x, x_unlabeled]))
+    pipeline = build_pipeline(config, params, best.params[K_PARAM], preprocess, columns.candidates)
     pipeline.fit(rows, y)
     keep = pipeline.named_steps["select"].get_support()
     fold_scores = best.user_attrs["fold_scores"]
@@ -77,6 +82,7 @@ def optimize_model(data: Data, config: Config) -> Result:
             n_rows=frame.height,
             n_columns=frame.width,
             n_rows_used=rows.height,
+            n_unlabeled_rows_used=training.unlabeled.height,
             n_rows_without_target=training.n_without_target,
             n_rows_with_infinite=training.n_with_infinite,
             infinite_by_column=training.infinite_by_column,
@@ -107,22 +113,26 @@ def _target(rows: pl.DataFrame, config: Config) -> np.ndarray:
     return rows[config.target].to_numpy()
 
 
-def _search(config: Config, x: np.ndarray, y: np.ndarray, cv_plan: CVPlan) -> optuna.Study:
+def _search(
+    config: Config, x: np.ndarray, y: np.ndarray, x_unlabeled: np.ndarray, cv_plan: CVPlan
+) -> optuna.Study:
     n_candidates = x.shape[1]
     metric = config.metric_spec
+    scorer = get_scorer(metric.scorer)
+    # The preprocessing uses no target, so each fold fits it once for every trial.
+    preprocesses = [
+        fit_preprocess(config, np.vstack([x[train], x_unlabeled[unlabeled]]))
+        for (train, _), unlabeled in zip(cv_plan.folds, cv_plan.unlabeled_folds, strict=True)
+    ]
 
     def objective(trial: optuna.Trial) -> float:
         params = config.model_spec.suggest(trial, n_candidates)
         k = trial.suggest_int(K_PARAM, 1, n_candidates, log=True)
-        scores = cross_validate(
-            build_pipeline(config, params, k),
-            x,
-            y,
-            cv=cv_plan.folds,
-            scoring=metric.scorer,
-            error_score=np.nan,
-        )["test_score"]
-        fold_scores = [metric.report_value(float(score)) for score in scores]
+        fold_scores = []
+        for (train, test), preprocess in zip(cv_plan.folds, preprocesses, strict=True):
+            pipeline = build_pipeline(config, params, k, preprocess)
+            score = _score_fold(pipeline, scorer, (x[train], y[train]), (x[test], y[test]))
+            fold_scores.append(metric.report_value(score))
         trial.set_user_attr("fold_scores", fold_scores)
         # A NaN (a fold failed) makes Optuna record the trial as failed.
         return float(np.mean(fold_scores))
@@ -132,6 +142,20 @@ def _search(config: Config, x: np.ndarray, y: np.ndarray, cv_plan: CVPlan) -> op
     if not _completed(study):
         raise OptimizationError("no trial finished with a score; see the warnings of the failed trials")
     return study
+
+
+def _score_fold(
+    pipeline: Pipeline,
+    scorer: Any,  # noqa: ANN401 - a scikit-learn scorer
+    train: tuple[np.ndarray, np.ndarray],
+    test: tuple[np.ndarray, np.ndarray],
+) -> float:
+    try:
+        pipeline.fit(*train)
+        return float(scorer(pipeline, *test))
+    except Exception as error:  # noqa: BLE001 - a failed fold fails the trial, not the run
+        warnings.warn(f"a CV fold failed: {error!r}", stacklevel=2)
+        return float("nan")
 
 
 def _completed(study: optuna.Study) -> list[optuna.trial.FrozenTrial]:

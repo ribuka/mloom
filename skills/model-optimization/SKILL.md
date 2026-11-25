@@ -24,7 +24,7 @@ them.
 - NEVER choose the CV method yourself. The right split depends on how the model will be used (future data → `timeseries`, unseen lots → `group`), which the data does not tell.
   - When you already know the columns (from the conversation or the user's code), use them to make the question concrete, such as "`timestamp` があります。将来のデータを予測する用途なら `timeseries` にしますか？".
 - Optional arguments, only when the user asks for them: `--metric`, `--n-splits` (default 5), `--exclude-columns`, `--n-trials` (default 100), `--timeout` (seconds), `--seed` (default 0), `--unavailable-sensors`, `--settings`.
-- To change the missing-rate threshold of column exclusion, the user edits `max_missing_rate` in `config/settings.toml`; do not edit it unless the user asks.
+- `config/settings.toml` of the user's repository holds `max_missing_rate` (threshold of column exclusion) and `use_unlabeled_rows` (whether rows without a target join the imputation and scaling statistics). Do not edit it unless the user asks.
 - Choose `--output` as `outputs/<target>-<model>-<cv>` unless the user names a directory. Tell the user that an existing `model.pkl` and `run.json` there are overwritten.
 
 ## 2. Run
@@ -47,7 +47,7 @@ Read `run.json` and report, in the user's language:
 - The score: `cv_scores.mean` ± `cv_scores.std` of `metric` (`metric_direction` says whether smaller or larger is better), the CV method and the number of folds.
 - The selected columns (`selected_columns`), out of `candidate_columns`.
 - The excluded columns grouped by `reason`. Always state the `unavailable_sensor` ones with their `detail`, and list `unavailable_sensors.not_in_data` (sensors in the file that are not in the data; possibly a typo).
-- The dropped rows: `data.n_rows_without_target`, and `data.n_rows_with_infinite` with `data.infinite_by_column` when it is not 0 (a column with many infinite values may be worth excluding).
+- The rows: `data.n_rows_used` for training, `data.n_unlabeled_rows_used` (rows without a target used only for the statistics), `data.n_rows_without_target`, and `data.n_rows_with_infinite` with `data.infinite_by_column` when it is not 0 (a column with many infinite values may be worth excluding).
 - `best_params`, and `hpo.n_trials_failed` when it is not 0.
 - Where `model.pkl` is, and that it is loaded with `pickle.load` and predicts from a table that has the candidate columns. Warn that a pickle must only be loaded from a trusted source.
 

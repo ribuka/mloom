@@ -101,6 +101,28 @@ def test_dropped_rows_are_recorded(frame: pl.DataFrame, make_config: Callable[..
     assert run["n_rows_with_infinite"] == 1
     assert run["infinite_by_column"] == {"s2": 1}
     assert run["n_rows_used"] == frame.height - 7
+    assert run["n_unlabeled_rows_used"] == 6
+
+
+@pytest.mark.parametrize("use_unlabeled", [True, False])
+def test_unlabeled_rows_join_the_preprocessing(
+    frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, use_unlabeled: bool
+) -> None:
+    """With ``use_unlabeled_rows``, the median and the scaling come from labeled and unlabeled rows."""
+    # Unlabeled rows far from the labeled ones move the statistics a lot.
+    unlabeled = frame.head(30).with_columns(y=pl.lit(None, dtype=pl.Float64), s0=pl.col("s0") + 100.0)
+    data = pl.concat([frame, unlabeled])
+    settings = tmp_path / "settings.toml"
+    settings.write_text(f"[preprocessing]\nuse_unlabeled_rows = {str(use_unlabeled).lower()}\n", encoding="utf-8")
+    result = optimize_model(data, make_config(model="pls", settings=settings))
+
+    statistic_rows = data if use_unlabeled else frame
+    preprocess = result.pipeline.named_steps["preprocess"].estimator
+    s0 = result.columns.candidates.index("s0")
+    assert preprocess.named_steps["scale"].mean_[s0] == pytest.approx(statistic_rows["s0"].mean())
+    assert preprocess.named_steps["impute"].statistics_[s0] == pytest.approx(statistic_rows["s0"].median())
+    assert result.data.n_unlabeled_rows_used == (30 if use_unlabeled else 0)
+    assert all(fold["n_unlabeled"] == (30 if use_unlabeled else 0) for fold in result.cv["folds"])
 
 
 @pytest.mark.parametrize(("rate", "excluded"), [(0.5, False), (0.2, True)])
@@ -112,8 +134,9 @@ def test_max_missing_rate_comes_from_settings(
     settings = tmp_path / "settings.toml"
     settings.write_text(f"[columns]\nmax_missing_rate = {rate}\n", encoding="utf-8")
     run = optimize_model(data, make_config(settings=settings)).to_dict()
-    assert ({"name": "s2", "reason": "high_missing", "detail": "0.250"} in run["excluded_columns"]) is excluded
-    assert run["settings"] == {"path": str(settings), "found": True, "max_missing_rate": rate}
+    high_missing = {"name": "s2", "reason": "high_missing", "detail": "labeled 0.250, all 0.250"}
+    assert (high_missing in run["excluded_columns"]) is excluded
+    assert run["settings"] == {"path": str(settings), "found": True, "max_missing_rate": rate, "use_unlabeled_rows": True}
 
 
 @pytest.mark.parametrize(

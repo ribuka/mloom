@@ -30,6 +30,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | データの渡し方 | API には Parquet のパス、または Polars の DataFrame を渡せる。CLI には Parquet のパスを渡す | 同上 |
 | 無限大 | 目的変数か、説明変数になりうる列に +inf・-inf がある行は、行ごと学習から外す（2026-11-26 ユーザー判断） | 欠損として補完すると、センサの異常値を「中央値」として学習に混ぜてしまうため |
 | 欠損率のしきい値 | 説明変数を除外する欠損率のしきい値を、利用側リポジトリの `config/settings.toml` で変えられる（2026-11-26 ユーザー判断） | データによって適したしきい値が違うため |
+| 目的変数が欠損した行 | 説明変数だけから計算する統計量（補完の中央値、標準化の平均・標準偏差）に、目的変数が欠損した行も使う。欠損率は「目的変数がある行」と「全行」の両方で見て、どちらかがしきい値を超えたら除外する。`config/settings.toml` で使わないようにも切り替えられる（既定は使う）（2026-11-26 ユーザー判断） | ソフトセンサのように分析値がまばらなデータでは、統計量が安定するため。欠損率は、学習で実際の値から学べる量（目的変数がある行）と、予測時に補完に頼る量（全行）の両方を満たす列だけを残すため。非定常運転などで使いたくないデータもあるので切り替えられるようにする |
 
 ### スコープ外
 
@@ -115,7 +116,13 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 [columns]
 # 欠損率がこの値を超える説明変数を除外する（high_missing）。0 〜 1。既定 0.5
 max_missing_rate = 0.5
+
+[preprocessing]
+# 目的変数が欠損した行を、欠損率と、補完・標準化の統計量に使うか。既定 true
+use_unlabeled_rows = true
 ```
+
+- このファイルは mloom 本体ではなく、**mloom を使う側のリポジトリ**に置く（実行時のカレントディレクトリの `config/settings.toml`）。`unavailable-sensors.json` と同じ。
 
 | 状況 | 扱い |
 | --- | --- |
@@ -136,16 +143,21 @@ max_missing_rate = 0.5
 6. 最良の設定で、学習に使う行のすべてを使って Pipeline を学習し直す。
 7. `model.pkl` と `run.json` を保存する。
 
-学習データの情報が評価に漏れないように、教師ありの処理（特徴量選択、欠損の補完、標準化）はすべて Pipeline の中に置き、CV の分割ごとに学習データだけで fit する。
+評価側のデータの情報が学習に漏れないように、次のように fit する。
+
+- 特徴量選択とモデル（目的変数を使う）は Pipeline の中に置き、CV の分割ごとに、学習側の目的変数がある行だけで fit する。
+- 補完と標準化（目的変数を使わない）は、CV の分割ごとに「学習側の目的変数がある行」と「学習側に当たる目的変数が欠損した行」（「CV」）で先に fit して固定し（scikit-learn の `FrozenEstimator`）、Pipeline に入れる。試行ごとには fit し直さない。
+- 最終モデルの補完と標準化は、目的変数がある行と、目的変数が欠損した行のすべてで fit する。
 
 ### 行の除外
 
-次の順に行を外し、それぞれの行数を `run.json` の `data` に残す。
+次の順に行を分け、外し、それぞれの行数を `run.json` の `data` に残す。
 
-| 順 | 外す行 | `run.json` |
+| 順 | 扱い | `run.json` |
 | --- | --- | --- |
-| 1 | 目的変数が欠損（null、NaN）の行 | `n_rows_without_target` |
-| 2 | 残りのうち、目的変数か、説明変数になりうる列に +inf・-inf がある行（2026-11-26 ユーザー判断） | `n_rows_with_infinite`、列ごとの行数は `infinite_by_column` |
+| 1 | 目的変数が欠損（null、NaN）の行を、学習と評価から外す。`use_unlabeled_rows` が true なら、統計量用の「目的変数が欠損した行」として残し、false なら捨てる | `n_rows_without_target` |
+| 2 | 学習用の行と、残した目的変数が欠損した行のうち、目的変数か、説明変数になりうる列に +inf・-inf がある行を外す（2026-11-26 ユーザー判断） | `n_rows_with_infinite`、列ごとの行数は `infinite_by_column` |
+| 結果 | 学習と評価に使う行、統計量だけに使う目的変数が欠損した行 | `n_rows_used`、`n_unlabeled_rows_used` |
 
 - 「説明変数になりうる列」は、列名で除外される列（目的変数、`time_column`・`group_column`、`exclude_columns`、使えないセンサ）を除いた浮動小数の列。列名で除外される列の無限大では行を外さない。
 - 無限大の判定は、欠損率などで列を除外する前に行う。そのため、あとで `high_missing` などで除外される列の無限大でも行は外れる。無限大が多い列は `infinite_by_column` で見つけ、`exclude_columns` か `unavailable-sensors.json` で外す。
@@ -165,10 +177,12 @@ max_missing_rate = 0.5
 | `non_numeric` | 数値でも真偽値でもない列（案）。真偽値は 0/1 の数値として扱う |
 | `all_null` | すべて欠損の列 |
 | `constant` | 欠損を除いて値が 1 種類の列 |
-| `high_missing` | 欠損率が `config/settings.toml` の `max_missing_rate`（既定 0.5）を超える列 |
+| `high_missing` | 「目的変数がある行での欠損率」か「目的変数が欠損した行も含めた全行での欠損率」のどちらかが、`config/settings.toml` の `max_missing_rate`（既定 0.5）を超える列。`detail` に両方の欠損率を残す |
 
 - 浮動小数の列の NaN は欠損として扱う。
-- 欠損率は、学習に使う行（「行の除外」の後）で計算する。
+- 欠損率は「行の除外」の後の行で計算する。`use_unlabeled_rows` が false なら、2 つの欠損率は同じになる。
+- `all_null` と `constant` は、目的変数がある行だけで判定する（モデルが学ぶのはこの行だけのため）。
+- 列の除外は CV の前に 1 回だけ行う。時系列の CV でも、欠損率は評価期間を含む全期間で計算する（目的変数を使わないので、ラベルの情報は漏れない）。
 - `high_missing` に当たらない欠損は、Pipeline の中で中央値で補完する（「モデル」）。
 - `time_column`・`group_column` に欠損があれば、分割できないのでエラーで止める（終了コード 2）。
 
@@ -186,6 +200,15 @@ max_missing_rate = 0.5
 
 - `timeseries` で行の並び順に頼らず `time_column` を必須にするのは、Parquet の行の順が時刻順とは限らないため（案）。
 - 必要な列が無い、またはデータに無いときは、学習を始める前にエラーで止める（終了コード 2）。
+- 分割に使うのは目的変数がある行だけ。目的変数が欠損した行は評価側に入らない。
+
+分割ごとに、補完・標準化の統計量に加える「目的変数が欠損した行」（2026-11-26 ユーザー判断。`run.json` の `cv.folds[].n_unlabeled`）:
+
+| `cv` | 加える行 | 理由 |
+| --- | --- | --- |
+| `kfold` | すべて | 評価側に当たる行が無い |
+| `timeseries` | 時刻が、学習側の最後の時刻以前の行 | 評価期間以降の説明変数の分布を見ないため |
+| `group` | 評価側のグループに属さない行 | 評価側のロットの説明変数の分布を見ないため |
 
 ### 特徴量選択（案）
 
@@ -198,7 +221,7 @@ max_missing_rate = 0.5
 
 - Optuna の `TPESampler(seed=seed)`、試行数 `n_trials`、打ち切り時間 `timeout`。
 - 目的関数は CV の平均スコア（指標の本来の値。RMSE なら正の値）。`rmse`、`mae`、`log_loss` は最小化、`r2`、`accuracy`、`f1_macro`、`roc_auc` は最大化。
-- CV のどれかの分割で学習や評価に失敗した試行は、失敗として記録して比べない（`run.json` の `hpo.n_trials_failed`）。すべての試行が失敗したら `OptimizationError`（終了コード 1）。
+- CV のどれかの分割で学習や評価に失敗した試行は、警告を標準エラーに出し、失敗として記録して比べない（`run.json` の `hpo.n_trials_failed`）。すべての試行が失敗したら `OptimizationError`（終了コード 1）。
 - 進捗は Optuna のログとして標準エラーに出る。
 - 探索空間はモデルごとに mloom 側で固定する（下の「モデル」）。Skill やユーザーには探索空間を書かせない。
 
@@ -216,7 +239,7 @@ max_missing_rate = 0.5
 - 探索範囲の正は `mloom.models`。上の表は 2026-11-26 のたたき台の実装の値。
 - 再現性のため、モデルの `n_jobs` は 1 に固定し、`random_state` に `seed` を渡す。
 
-- Pipeline の構成: 入力列の選択 → 欠損の補完 → （標準化）→ 特徴量選択 → 推定器。
+- Pipeline の構成: 入力列の選択 → 前処理（欠損の補完 →（標準化）。fit 済みで固定）→ 特徴量選択 → 推定器。前処理の fit に使う行は「処理の流れ」。
 - 分類の `ridge` に `RidgeClassifier` ではなく `LogisticRegression` を当てるのは、`log_loss` と `roc_auc` に要る確率（`predict_proba`）を出せるため（案）。
 - `lightgbm` は追加の依存（`mloom[lightgbm]`）にする（案）。入っていない環境で `model: lightgbm` を指定したら、インストール方法を示してエラーで止める。
 - `task` に対応しないモデルを指定したら、学習を始める前にエラーで止める（終了コード 2）。
@@ -247,8 +270,8 @@ max_missing_rate = 0.5
   "mloom_version": "0.1.0",
   "created_at": "2026-11-26T10:00:00+09:00",
   "data": {
-    "path": "data/train.parquet", "n_rows": 12000, "n_columns": 320, "n_rows_used": 11940,
-    "n_rows_without_target": 50, "n_rows_with_infinite": 10, "infinite_by_column": {"TI-115": 10}
+    "path": "data/train.parquet", "n_rows": 12000, "n_columns": 320, "n_rows_used": 1990, "n_unlabeled_rows_used": 9950,
+    "n_rows_without_target": 10000, "n_rows_with_infinite": 60, "infinite_by_column": {"TI-115": 60}
   },
   "target": "quality",
   "task": "regression",
@@ -262,18 +285,18 @@ max_missing_rate = 0.5
     "sensors": {"TI-101": "2026-10 から故障中", "FI-205": "廃止"},
     "not_in_data": ["FI-205"]
   },
-  "settings": {"path": "config/settings.toml", "found": true, "max_missing_rate": 0.5},
+  "settings": {"path": "config/settings.toml", "found": true, "max_missing_rate": 0.5, "use_unlabeled_rows": true},
   "excluded_columns": [
     {"name": "timestamp", "reason": "role", "detail": null},
     {"name": "TI-101", "reason": "unavailable_sensor", "detail": "2026-10 から故障中"},
-    {"name": "FI-950", "reason": "high_missing", "detail": "0.798"}
+    {"name": "FI-950", "reason": "high_missing", "detail": "labeled 0.798, all 0.412"}
   ],
   "candidate_columns": ["..."],
   "selected_columns": ["..."],
   "cv": {
     "method": "timeseries", "splitter": "TimeSeriesSplit", "n_splits": 5,
     "time_column": "timestamp", "group_column": null,
-    "folds": [{"n_train": 2000, "n_test": 1990}]
+    "folds": [{"n_train": 330, "n_test": 330, "n_unlabeled": 1650}]
   },
   "hpo": {"sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 100, "n_trials_failed": 0, "timeout": null, "best_trial": 57},
   "best_params": {"alpha": 0.31, "k": 42},
@@ -389,7 +412,6 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | 16 | pickle の読み込みに mloom が要る | 予測する環境にも mloom を入れる前提でよいか。避けるなら `ColumnSelector` をやめ、scikit-learn の `ColumnTransformer` で列を選ぶ（polars の表の扱いを確かめる必要がある） |
 | 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、`run.json` と標準エラーに警告を出すか |
 | 18 | 予測時の無限大 | 予測時は行を外せないので、今は scikit-learn の `ValueError` になる。欠損とみなして補完するか、エラーのままにするか |
-| 19 | 標準化（と補完）に使う行 | `ridge`・`pls` の標準化の平均・標準偏差を、目的変数が欠損している行も含めて計算するか（2026-11-26 ユーザー提案）。CV では評価側に当たる行（時系列なら評価期間以降、Group なら評価側のグループ）を除く必要がある。欠損の補完の中央値も同じ扱いにするか |
 
 ## 完了条件（v0.1、案）
 

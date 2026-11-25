@@ -1,8 +1,10 @@
-"""Choosing the training rows: rows with a target and without infinite values.
+"""Choosing the rows: labeled rows for training, unlabeled rows for statistics.
 
-See "行の除外" in ``docs/spec.md``. A row is dropped when its target is
-missing, or when the target or a column that can become a feature holds
-+inf or -inf.
+See "行の除外" in ``docs/spec.md``. Rows without a target are "unlabeled";
+they are kept only when ``use_unlabeled`` is set, for the missing rates and
+the imputation and scaling statistics. A labeled or kept unlabeled row is
+dropped when the target or a column that can become a feature holds +inf
+or -inf.
 """
 
 from dataclasses import dataclass
@@ -17,29 +19,37 @@ from mloom.sensors import UnavailableSensors
 
 @dataclass(frozen=True)
 class TrainingRows:
-    """The training rows and what was dropped.
+    """The rows of a run and what was dropped.
 
     Parameters
     ----------
-    frame : pl.DataFrame
-        The training rows, in the order of the input.
+    labeled : pl.DataFrame
+        Rows with a target, used for training and evaluation.
+    unlabeled : pl.DataFrame
+        Rows without a target, used only for statistics of the features;
+        empty when they are not used.
     n_without_target : int
-        Rows dropped because the target is missing (null or NaN).
+        Rows of the input whose target is missing (null or NaN).
     n_with_infinite : int
-        Rows dropped, among those with a target, because of +inf or -inf.
+        Rows dropped, among the labeled and the kept unlabeled rows, because
+        of +inf or -inf.
     infinite_by_column : dict[str, int]
         For each column holding +inf or -inf, the number of such rows among
-        those with a target. A row can count for several columns.
+        the labeled and the kept unlabeled rows. A row can count for several
+        columns.
     """
 
-    frame: pl.DataFrame
+    labeled: pl.DataFrame
+    unlabeled: pl.DataFrame
     n_without_target: int
     n_with_infinite: int
     infinite_by_column: dict[str, int]
 
 
-def select_rows(frame: pl.DataFrame, config: Config, sensors: UnavailableSensors) -> TrainingRows:
-    """Drop the rows that cannot be used for training.
+def select_rows(
+    frame: pl.DataFrame, config: Config, sensors: UnavailableSensors, *, use_unlabeled: bool
+) -> TrainingRows:
+    """Split the rows into labeled and unlabeled ones and drop infinite values.
 
     Parameters
     ----------
@@ -50,38 +60,43 @@ def select_rows(frame: pl.DataFrame, config: Config, sensors: UnavailableSensors
     sensors : UnavailableSensors
         The unavailable sensors; their columns are not checked for infinite
         values.
+    use_unlabeled : bool
+        Whether to keep the rows without a target.
 
     Returns
     -------
     TrainingRows
-        The training rows and the counts of dropped rows.
+        The rows and the counts of dropped rows.
 
     Raises
     ------
     InputError
-        When no row is left.
+        When no labeled row is left.
     """
     target = pl.col(config.target)
     if frame.schema[config.target].is_float():
         target = target.fill_nan(None)
-    with_target = frame.filter(target.is_not_null())
-    if with_target.height == 0:
+    has_target = frame.select(target.is_not_null()).to_series()
+    if not has_target.any():
         raise InputError(f"target {config.target!r} has no values")
+    kept = frame.filter(has_target | use_unlabeled)
+    kept_has_target = has_target.filter(has_target | use_unlabeled)
 
     checked = [
         name
         for name, dtype in frame.schema.items()
         if dtype.is_float() and (name == config.target or name_reason(name, config, sensors) is None)
     ]
-    infinite = {name: pl.col(name).is_infinite().fill_null(value=False) for name in checked}
-    counts = with_target.select(expr.sum() for expr in infinite.values()).row(0) if checked else ()
-    by_column = {name: int(count) for name, count in zip(checked, counts, strict=True) if count}
-    rows = with_target.filter(~pl.any_horizontal(infinite.values())) if checked else with_target
-    if rows.height == 0:
-        raise InputError("no row is left after dropping the rows with infinite values")
+    infinite = [pl.col(name).is_infinite().fill_null(value=False) for name in checked]
+    counts = kept.select(infinite).sum().row(0) if checked else ()
+    finite = kept.select(~pl.any_horizontal(infinite)).to_series() if checked else pl.repeat(True, kept.height, eager=True)
+    labeled = kept.filter(finite & kept_has_target)
+    if labeled.height == 0:
+        raise InputError("no row with a target is left after dropping the rows with infinite values")
     return TrainingRows(
-        frame=rows,
-        n_without_target=frame.height - with_target.height,
-        n_with_infinite=with_target.height - rows.height,
-        infinite_by_column=by_column,
+        labeled=labeled,
+        unlabeled=kept.filter(finite & ~kept_has_target),
+        n_without_target=frame.height - int(has_target.sum()),
+        n_with_infinite=kept.height - int(finite.sum()),
+        infinite_by_column={name: int(count) for name, count in zip(checked, counts, strict=True) if count},
     )

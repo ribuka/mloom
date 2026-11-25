@@ -32,11 +32,15 @@ class CVPlan:
     splitter : str
         Class name of the scikit-learn splitter.
     folds : list[Split]
-        Train and test row indices of each fold.
+        Train and test indices of the labeled rows of each fold.
+    unlabeled_folds : list[np.ndarray]
+        For each fold, indices of the unlabeled rows that are on the training
+        side and may join the statistics of the features.
     """
 
     splitter: str
     folds: list[Split]
+    unlabeled_folds: list[np.ndarray]
 
     def describe(self, config: Config) -> dict[str, Any]:
         """Describe the split for ``run.json``.
@@ -57,7 +61,10 @@ class CVPlan:
             "n_splits": config.n_splits,
             "time_column": config.time_column,
             "group_column": config.group_column,
-            "folds": [{"n_train": len(train), "n_test": len(test)} for train, test in self.folds],
+            "folds": [
+                {"n_train": len(train), "n_test": len(test), "n_unlabeled": len(unlabeled)}
+                for (train, test), unlabeled in zip(self.folds, self.unlabeled_folds, strict=True)
+            ],
         }
 
 
@@ -81,15 +88,17 @@ def order_rows(frame: pl.DataFrame, config: Config) -> pl.DataFrame:
     return frame
 
 
-def plan_cv(frame: pl.DataFrame, y: np.ndarray, config: Config) -> CVPlan:
+def plan_cv(frame: pl.DataFrame, y: np.ndarray, unlabeled: pl.DataFrame, config: Config) -> CVPlan:
     """Split the rows into folds.
 
     Parameters
     ----------
     frame : pl.DataFrame
-        The training rows, ordered by ``order_rows``.
+        The labeled rows, ordered by ``order_rows``.
     y : np.ndarray
         Target of each row.
+    unlabeled : pl.DataFrame
+        The unlabeled rows used for statistics (may be empty).
     config : Config
         The config of the run.
 
@@ -113,7 +122,27 @@ def plan_cv(frame: pl.DataFrame, y: np.ndarray, config: Config) -> CVPlan:
         raise InputError(f"data has {frame.height} rows, too few for n_splits={config.n_splits}")
     splitter = _splitter(config)
     folds = [(train, test) for train, test in splitter.split(np.zeros(frame.height), y, groups)]
-    return CVPlan(splitter=type(splitter).__name__, folds=folds)
+    return CVPlan(
+        splitter=type(splitter).__name__,
+        folds=folds,
+        unlabeled_folds=[_training_side(frame, unlabeled, train, test, config) for train, test in folds],
+    )
+
+
+def _training_side(
+    frame: pl.DataFrame, unlabeled: pl.DataFrame, train: np.ndarray, test: np.ndarray, config: Config
+) -> np.ndarray:
+    # Unlabeled rows that would leak the test side: later times, or the groups under test.
+    indices = np.arange(unlabeled.height)
+    if unlabeled.height == 0:
+        return indices
+    if config.cv == "timeseries" and config.time_column is not None:
+        last_train_time = frame[config.time_column].to_numpy()[train].max()
+        return indices[unlabeled[config.time_column].to_numpy() <= last_train_time]
+    if config.cv == "group" and config.group_column is not None:
+        test_groups = frame[config.group_column].to_numpy()[test]
+        return indices[~np.isin(unlabeled[config.group_column].to_numpy(), test_groups)]
+    return indices
 
 
 def _splitter(config: Config) -> Any:  # noqa: ANN401 - any scikit-learn splitter

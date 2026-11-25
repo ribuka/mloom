@@ -25,7 +25,7 @@ def test_each_column_gets_its_reason(frame: pl.DataFrame, make_config: Callable[
         sparse=pl.Series(np.where(np.arange(frame.height) % 4 == 0, np.arange(frame.height), np.nan)),
     )
     config = make_config(cv="group", group_column="lot", exclude_columns=("c", "s5"))
-    plan = plan_columns(data, config, _sensors(s4="故障", gone=None), 0.5)
+    plan = plan_columns(data, data.clear(), config, _sensors(s4="故障", gone=None), 0.5)
     reasons = {column.name: column.reason for column in plan.excluded}
     assert reasons == {
         "y": "target",
@@ -44,16 +44,43 @@ def test_each_column_gets_its_reason(frame: pl.DataFrame, make_config: Callable[
 
 def test_unavailable_sensor_keeps_its_reason(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
     """The reason in the JSON file is kept as the detail."""
-    plan = plan_columns(frame, make_config(), _sensors(s0="故障"), 0.5)
+    plan = plan_columns(frame, frame.clear(), make_config(), _sensors(s0="故障"), 0.5)
     [excluded] = [column for column in plan.excluded if column.name == "s0"]
     assert excluded.detail == "故障"
+
+
+@pytest.mark.parametrize(
+    ("labeled_missing", "unlabeled_missing", "detail"),
+    [
+        (0.6, 0.0, "labeled 0.600, all 0.300"),
+        (0.2, 1.0, "labeled 0.200, all 0.600"),
+        (0.4, 0.4, None),
+    ],
+)
+def test_high_missing_uses_both_rates(
+    frame: pl.DataFrame,
+    make_config: Callable[..., Config],
+    labeled_missing: float,
+    unlabeled_missing: float,
+    detail: str | None,
+) -> None:
+    """A column is excluded when its missing rate in the labeled rows or in all rows is above the threshold."""
+
+    def with_missing(rows: pl.DataFrame, rate: float) -> pl.DataFrame:
+        n_missing = round(rows.height * rate)
+        return rows.with_columns(s0=pl.when(pl.int_range(pl.len()) < n_missing).then(None).otherwise(pl.col("s0")))
+
+    labeled, unlabeled = with_missing(frame.head(60), labeled_missing), with_missing(frame.tail(60), unlabeled_missing)
+    plan = plan_columns(labeled, unlabeled, make_config(), NO_SENSORS, 0.5)
+    details = {column.name: column.detail for column in plan.excluded if column.reason == "high_missing"}
+    assert details.get("s0") == detail
 
 
 def test_no_candidate_raises(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
     """When every column is excluded, ``InputError`` is raised."""
     config = make_config(exclude_columns=("t", "s0", "s1", "s2", "s3", "s4", "s5", "c"))
     with pytest.raises(InputError, match="no column is left"):
-        plan_columns(frame, config, NO_SENSORS, 0.5)
+        plan_columns(frame, frame.clear(), config, NO_SENSORS, 0.5)
 
 
 @pytest.mark.parametrize(
