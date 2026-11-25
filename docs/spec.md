@@ -4,6 +4,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 - 本書はたたき台（2026-11-26 作成）。出典は会話記録「モデル最適化 Skill 化案」の抜粋と、その会話の最初のユーザーの入力。
 - 「決定」は会話で合意した事項、「案」は本書で提案する未確定の事項。案は「未決事項」で確認してから決定に移す。
+- 案のまま、試しに動かせるたたき台を実装した（2026-11-26、v0.1.0）。実装で値を決めた箇所は、その旨を書いている。
 
 ## 要件
 
@@ -124,12 +125,14 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | `role` | `time_column`、`group_column` |
 | `user_excluded` | `exclude_columns` で指定した列 |
 | `unavailable_sensor` | 使えないセンサ |
-| `non_numeric` | 数値でない列（案） |
+| `non_numeric` | 数値でも真偽値でもない列（案）。真偽値は 0/1 の数値として扱う |
 | `all_null` | すべて欠損の列 |
 | `constant` | 欠損を除いて値が 1 種類の列 |
 | `high_missing` | 欠損率がしきい値（案: 0.5）を超える列 |
 
-- 目的変数が欠損している行は、学習と評価から外す（案）。外した行数を `run.json` に残す。
+- 浮動小数の列の NaN は欠損として扱う。
+- 目的変数が欠損している行は、学習と評価から外す（案）。使った行数を `run.json` の `data.n_rows_used` に残す。
+- `time_column`・`group_column` に欠損があれば、分割できないのでエラーで止める（終了コード 2）。
 
 ### CV
 
@@ -156,7 +159,9 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 ### HPO（案）
 
 - Optuna の `TPESampler(seed=seed)`、試行数 `n_trials`、打ち切り時間 `timeout`。
-- 目的関数は CV の平均スコア。`rmse`、`mae`、`log_loss` は最小化、`r2`、`accuracy`、`f1_macro`、`roc_auc` は最大化。
+- 目的関数は CV の平均スコア（指標の本来の値。RMSE なら正の値）。`rmse`、`mae`、`log_loss` は最小化、`r2`、`accuracy`、`f1_macro`、`roc_auc` は最大化。
+- CV のどれかの分割で学習や評価に失敗した試行は、失敗として記録して比べない（`run.json` の `hpo.n_trials_failed`）。すべての試行が失敗したら `OptimizationError`（終了コード 1）。
+- 進捗は Optuna のログとして標準エラーに出る。
 - 探索空間はモデルごとに mloom 側で固定する（下の「モデル」）。Skill やユーザーには探索空間を書かせない。
 
 ### モデル（案）
@@ -165,10 +170,13 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 | `model` | 回帰の推定器 | 分類の推定器 | 前処理 | 探索するパラメータ（案） |
 | --- | --- | --- | --- | --- |
-| `ridge` | `Ridge` | `LogisticRegression`（L2） | 中央値で補完、標準化 | 回帰は `alpha`、分類は `C`: いずれも 1e-4 〜 1e3（対数） |
-| `pls` | `PLSRegression` | 未決（PLS-DA） | 中央値で補完、標準化 | `n_components`: 1 〜 min(20, `k`) |
-| `random_forest` | `RandomForestRegressor` | `RandomForestClassifier` | 中央値で補完 | `n_estimators`、`max_depth`、`min_samples_leaf`、`max_features` |
-| `lightgbm` | `LGBMRegressor` | `LGBMClassifier` | 中央値で補完 | `num_leaves`、`learning_rate`、`n_estimators`、`min_child_samples`、`subsample`、`colsample_bytree`、`reg_lambda` |
+| `ridge` | `Ridge` | `LogisticRegression`（L2） | 中央値で補完、標準化 | `alpha`: 1e-4 〜 1e3（対数）。分類では `C = 1 / alpha` |
+| `pls` | `PLSRegression`（`scale=False`） | 未対応（指定するとエラー。未決 1） | 中央値で補完、標準化 | `n_components`: 1 〜 min(20, 候補列数)。`k` を超える分は `k` に切り詰める |
+| `random_forest` | `RandomForestRegressor` | `RandomForestClassifier` | 中央値で補完 | `n_estimators`: 50 〜 300、`max_depth`: 2 〜 32、`min_samples_leaf`: 1 〜 20、`max_features`: 0.1 〜 1.0 |
+| `lightgbm` | `LGBMRegressor` | `LGBMClassifier` | 中央値で補完 | `num_leaves`: 8 〜 256、`learning_rate`: 1e-3 〜 0.3、`n_estimators`: 50 〜 1000、`min_child_samples`: 5 〜 100、`subsample`・`colsample_bytree`: 0.5 〜 1.0、`reg_lambda`: 1e-8 〜 10 |
+
+- 探索範囲の正は `mloom.models`。上の表は 2026-11-26 のたたき台の実装の値。
+- 再現性のため、モデルの `n_jobs` は 1 に固定し、`random_state` に `seed` を渡す。
 
 - Pipeline の構成: 入力列の選択 → 欠損の補完 → （標準化）→ 特徴量選択 → 推定器。
 - 分類の `ridge` に `RidgeClassifier` ではなく `LogisticRegression` を当てるのは、`log_loss` と `roc_auc` に要る確率（`predict_proba`）を出せるため（案）。
@@ -187,11 +195,14 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 ### `model.pkl`
 
 - 標準ライブラリの `pickle` で保存する。
-- 読むときは `pickle.load` の結果の `predict` に、学習時の入力列を含む表を渡す。列の選択は Pipeline が行う。
+- 読むときは `pickle.load` の結果の `predict` に、候補列（`run.json` の `candidate_columns`）を含む表（polars または pandas の DataFrame）を渡す。Pipeline の先頭の `ColumnSelector` が列を名前で選ぶので、列の順は問わず、余分な列は無視される（2026-11-26 実装・テストで確認）。
+- `ColumnSelector` は mloom のクラスなので、**pickle を読む環境にも mloom が要る**（2026-11-26 実装で判明した制約）。
 - pickle は保存したときと同じ版の scikit-learn などで読む前提。版は `run.json` に残す。
 - 信頼できない pickle を読まない（pickle は読むときに任意のコードを実行できる）。README に書く。
 
-### `run.json`（案）
+### `run.json`
+
+2026-11-26 のたたき台の実装の形（値は例。正は `mloom.result.Result.to_dict`）:
 
 ```json
 {
@@ -202,23 +213,30 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
   "task": "regression",
   "model": "ridge",
   "metric": "rmse",
+  "metric_direction": "minimize",
   "seed": 0,
   "unavailable_sensors": {
     "path": "config/unavailable-sensors.json",
     "found": true,
+    "sensors": {"TI-101": "2026-10 から故障中", "FI-205": "廃止"},
     "not_in_data": ["FI-205"]
   },
   "excluded_columns": [
-    {"name": "TI-101", "reason": "unavailable_sensor"},
-    {"name": "lot_id", "reason": "role"}
+    {"name": "timestamp", "reason": "role", "detail": null},
+    {"name": "TI-101", "reason": "unavailable_sensor", "detail": "2026-10 から故障中"},
+    {"name": "FI-950", "reason": "high_missing", "detail": "0.798"}
   ],
   "candidate_columns": ["..."],
   "selected_columns": ["..."],
-  "cv": {"method": "timeseries", "splitter": "TimeSeriesSplit", "n_splits": 5, "time_column": "timestamp"},
-  "hpo": {"sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 100, "timeout": null},
-  "best_params": {"k": 42, "alpha": 0.31},
+  "cv": {
+    "method": "timeseries", "splitter": "TimeSeriesSplit", "n_splits": 5,
+    "time_column": "timestamp", "group_column": null,
+    "folds": [{"n_train": 2000, "n_test": 1990}]
+  },
+  "hpo": {"sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 100, "n_trials_failed": 0, "timeout": null, "best_trial": 57},
+  "best_params": {"alpha": 0.31, "k": 42},
   "cv_scores": {"folds": [0.81, 0.79, 0.84, 0.80, 0.82], "mean": 0.812, "std": 0.017},
-  "versions": {"python": "3.13.x", "scikit-learn": "...", "optuna": "...", "polars": "..."}
+  "versions": {"python": "3.13.13", "mloom": "0.1.0", "scikit-learn": "1.9.1", "optuna": "5.1.0", "polars": "2.2.0", "numpy": "...", "scipy": "...", "lightgbm": null}
 }
 ```
 
@@ -242,8 +260,8 @@ result.cv_scores     # CV のスコア
 result.save("outputs/ridge")  # model.pkl と run.json
 ```
 
-- 設定は `mloom.Config`（dataclass）で渡す（案）。CLI の引数と 1 対 1 に対応させる。
-- 不正な入力（目的変数が無い、モデル名が無い、候補列が 0 列など）は、学習を始める前に例外を投げる。
+- 設定は `mloom.Config`（frozen dataclass）で渡す。CLI の引数と 1 対 1 に対応させる。データが要らない検査（モデル名、`task` とモデルの組み合わせ、CV に要る列の指定など）は `Config` を作った時点で行う。
+- 不正な入力（目的変数が無い、モデル名が無い、候補列が 0 列など）は、学習を始める前に `mloom.InputError` を投げる。
 
 ## CLI（案）
 
@@ -260,9 +278,10 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | 1 | 想定外のエラー |
 | 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`） |
 
-## Skill（案）
+## Skill
 
-- 本リポジトリの `skills/model-optimization/SKILL.md` に置く。
+- 本リポジトリの `skills/model-optimization/SKILL.md` に置く（2026-11-26 たたき台を作成）。
+- 5 つの入力のうち足りないものはユーザーに聞く。CV の方法は Skill が推測して決めず、知っている列名を材料に聞き返す。
 - 役割は 2 つだけ: ユーザーの指定を CLI の引数に変換して実行する、`run.json` を読んで結果を説明する（採用した列、除外した列と理由、スコア、最良のパラメータ）。
 - どの列を除外するか、どう評価するか、何を保存するかを Skill で決めない。それらは Python 側で固定する。
 
@@ -286,17 +305,20 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | パッケージ管理 | uv |
 | lint、型チェック、テスト | ruff、ty、pytest |
 
-## パッケージ構成（案）
+## パッケージ構成
 
 | モジュール | 責務 |
 | --- | --- |
-| `mloom` | 公開 API の再エクスポート（`optimize_model`、`Config`、`Result`） |
-| `mloom.config` | `Config` の定義と検証 |
+| `mloom` | 公開 API の再エクスポート（`optimize_model`、`Config`、`Result`、例外） |
+| `mloom.errors` | 例外（`InputError` は終了コード 2、それ以外は 1） |
+| `mloom.config` | `Config` の定義と、データが要らない検査 |
+| `mloom.metrics` | 評価指標と、タスクごとに選べる指標 |
+| `mloom.models` | モデルのレジストリ（推定器、標準化の要否、探索空間） |
 | `mloom.data` | データの読み込み |
-| `mloom.sensors` | `unavailable-sensors.json` の読み込みと照合 |
+| `mloom.sensors` | `unavailable-sensors.json` の読み込み |
 | `mloom.columns` | 列の除外と理由の記録 |
-| `mloom.models` | モデルのレジストリ（推定器、前処理、探索空間） |
-| `mloom.cv` | CV の分割の決定 |
+| `mloom.cv` | ユーザーが指定した CV の分割 |
+| `mloom.pipeline` | Pipeline の組み立てと `ColumnSelector` |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
 | `mloom.result` | `Result` と保存（`model.pkl`、`run.json`） |
 | `mloom.cli` / `mloom.__main__` | CLI |
@@ -305,7 +327,7 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 
 | # | 論点 | 案 |
 | --- | --- | --- |
-| 1 | 分類の `pls` | PLS-DA（目的変数を one-hot にして `PLSRegression`、最大の列をクラスとする）を mloom で実装するか、分類では `pls` を選べないことにするか |
+| 1 | 分類の `pls` | PLS-DA（目的変数を one-hot にして `PLSRegression`、最大の列をクラスとする）を mloom で実装するか、分類では `pls` を選べないことにするか。たたき台の実装は後者（指定するとエラー） |
 | 2 | 分類の範囲 | 2 値と多値の両方。クラスの不均衡への対応（`class_weight` を探索するか）は後回し |
 | 3 | CV で選べる方法 | `timeseries`、`group`、`kfold` の 3 つ。時系列かつグループ（ロットごとに時刻順）の分割が要るか |
 | 4 | `timeseries` の時刻の列 | `time_column` を必須にする。行の並び順を時刻順とみなす指定も許すか |
@@ -320,6 +342,8 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | 13 | 利用環境への導入 | オフラインか、PyPI のミラーがあるか。git の依存で入れられるか |
 | 14 | 並列実行 | Optuna の `n_jobs` やモデルの `n_jobs` を使うか（再現性とのトレードオフ） |
 | 15 | 複数の目的変数 | 「まずは 1 個」の次の段階で、目的変数ごとに別の Pipeline を作るか、1 つのモデルで同時に予測するか |
+| 16 | pickle の読み込みに mloom が要る | 予測する環境にも mloom を入れる前提でよいか。避けるなら `ColumnSelector` をやめ、scikit-learn の `ColumnTransformer` で列を選ぶ（polars の表の扱いを確かめる必要がある） |
+| 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、`run.json` と標準エラーに警告を出すか |
 
 ## 完了条件（v0.1、案）
 
@@ -329,3 +353,5 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 - `model.pkl` を `pickle.load` して、学習時と同じ列を持つ表に `predict` できる。
 - 同じ入力と `seed` で 2 回実行すると、採用した列と最良のパラメータが一致する。
 - 表の 4 つのモデルそれぞれで、上の 4 つがテストで確かめられている。
+
+2026-11-26 のたたき台の実装で、上の条件はすべてテスト（`tests/`）で確かめた。ただし分類の `pls` は未対応（未決 1）。
