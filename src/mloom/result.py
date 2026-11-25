@@ -13,6 +13,7 @@ from sklearn.pipeline import Pipeline
 from mloom.columns import ColumnPlan
 from mloom.config import Config
 from mloom.sensors import UnavailableSensors
+from mloom.settings import Settings
 
 MODEL_FILE = "model.pkl"
 RUN_FILE = "run.json"
@@ -29,16 +30,25 @@ class DataSummary:
         Path of the Parquet file, or ``None`` for a DataFrame.
     n_rows : int
         Rows of the input.
-    n_rows_used : int
-        Rows used for training (rows with a target).
     n_columns : int
         Columns of the input.
+    n_rows_used : int
+        Rows used for training.
+    n_rows_without_target : int
+        Rows dropped because the target is missing.
+    n_rows_with_infinite : int
+        Rows dropped because of +inf or -inf.
+    infinite_by_column : dict[str, int]
+        Rows with +inf or -inf in each column (``mloom.rows.TrainingRows``).
     """
 
     path: str | None
     n_rows: int
-    n_rows_used: int
     n_columns: int
+    n_rows_used: int
+    n_rows_without_target: int
+    n_rows_with_infinite: int
+    infinite_by_column: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,8 @@ class Result:
         The input data.
     sensors : UnavailableSensors
         The unavailable sensors that were read.
+    settings : Settings
+        The settings that were used.
     columns : ColumnPlan
         The candidate and excluded columns.
     selected_columns : list[str]
@@ -76,6 +88,7 @@ class Result:
     config: Config
     data: DataSummary
     sensors: UnavailableSensors
+    settings: Settings
     columns: ColumnPlan
     selected_columns: list[str]
     best_params: dict[str, Any]
@@ -109,6 +122,7 @@ class Result:
                 "sensors": self.sensors.reasons,
                 "not_in_data": self.columns.sensors_not_in_data,
             },
+            "settings": vars(self.settings),
             "excluded_columns": [vars(column) for column in self.columns.excluded],
             "candidate_columns": self.columns.candidates,
             "selected_columns": self.selected_columns,

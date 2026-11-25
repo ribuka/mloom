@@ -28,6 +28,8 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | 入口 | **Python API が本体**。Skill 向けに薄い CLI を用意する。CLI は Python API を呼ぶだけにする | 人は Notebook や既存コードから API で使い、エージェントは設定を渡して 1 回実行し、終了コードと `run.json` で結果を確かめる。センサ除外・特徴量選択・HPO の実装は 1 か所に置く |
 | API の形 | `optimize_model(data, config)` が学習済み Pipeline と評価結果を返し、`result.save(output_dir)` で `model.pkl` と `run.json` を保存する | 同上 |
 | データの渡し方 | API には Parquet のパス、または Polars の DataFrame を渡せる。CLI には Parquet のパスを渡す | 同上 |
+| 無限大 | 目的変数か、説明変数になりうる列に +inf・-inf がある行は、行ごと学習から外す（2026-11-26 ユーザー判断） | 欠損として補完すると、センサの異常値を「中央値」として学習に混ぜてしまうため |
+| 欠損率のしきい値 | 説明変数を除外する欠損率のしきい値を、利用側リポジトリの `config/settings.toml` で変えられる（2026-11-26 ユーザー判断） | データによって適したしきい値が違うため |
 
 ### スコープ外
 
@@ -75,6 +77,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | `metric` | | `task` ごとの既定 | 評価指標。回帰は `rmse`（既定）、`mae`、`r2`。分類は `log_loss`（既定）、`accuracy`、`f1_macro`、`roc_auc`（2 値のみ） |
 | `exclude_columns` | | `[]` | 説明変数から外す列（ID 列など） |
 | `unavailable_sensors` | | `config/unavailable-sensors.json` | 使えないセンサの定義ファイル。カレントディレクトリからの相対パス |
+| `settings` | | `config/settings.toml` | 処理の調整値のファイル（下の「設定ファイル」）。カレントディレクトリからの相対パス |
 | `n_trials` | | 100 | HPO の試行数 |
 | `timeout` | | なし | HPO の打ち切り時間（秒） |
 | `seed` | | 0 | 乱数の種。CV の分割、Optuna の sampler、モデルに渡す |
@@ -104,16 +107,50 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 - 照合は列名の完全一致（案）。1 つのセンサから複数の列がある場合（`TI-101_mean` など）の照合は「未決事項」。
 
+### 設定ファイル（`config/settings.toml`）
+
+決定事項: 処理の調整値を、利用側リポジトリの `config/settings.toml` で変えられる（2026-11-26 ユーザー判断）。
+
+```toml
+[columns]
+# 欠損率がこの値を超える説明変数を除外する（high_missing）。0 〜 1。既定 0.5
+max_missing_rate = 0.5
+```
+
+| 状況 | 扱い |
+| --- | --- |
+| ファイルが無い | すべて既定値で続ける。`run.json` の `settings.found` が `false` になる |
+| キーが無い | そのキーだけ既定値 |
+| TOML として読めない、知らない表やキーがある、値が範囲外 | エラーで止める（終了コード 2）。打ち間違いで黙って既定値になるのを防ぐため |
+
+- 使った値は `run.json` の `settings` に残す。
+- 例は `examples/settings.toml`。
+
 ## 処理の流れ
 
 1. データを読む（Polars）。
-2. 列を除外する（下の「列の除外」）。除外した列と理由をすべて記録する。
-3. CV の分割を決める（下の「CV」）。
-4. Optuna で、特徴量選択とモデルのハイパーパラメータを同時に探索する（下の「特徴量選択」「HPO」）。各試行の評価は CV の平均スコア。
-5. 最良の設定で、全データを使って Pipeline を学習し直す。
-6. `model.pkl` と `run.json` を保存する。
+2. 学習に使う行を選ぶ（下の「行の除外」）。
+3. 列を除外する（下の「列の除外」）。除外した列と理由をすべて記録する。
+4. CV の分割を決める（下の「CV」）。
+5. Optuna で、特徴量選択とモデルのハイパーパラメータを同時に探索する（下の「特徴量選択」「HPO」）。各試行の評価は CV の平均スコア。
+6. 最良の設定で、学習に使う行のすべてを使って Pipeline を学習し直す。
+7. `model.pkl` と `run.json` を保存する。
 
 学習データの情報が評価に漏れないように、教師ありの処理（特徴量選択、欠損の補完、標準化）はすべて Pipeline の中に置き、CV の分割ごとに学習データだけで fit する。
+
+### 行の除外
+
+次の順に行を外し、それぞれの行数を `run.json` の `data` に残す。
+
+| 順 | 外す行 | `run.json` |
+| --- | --- | --- |
+| 1 | 目的変数が欠損（null、NaN）の行 | `n_rows_without_target` |
+| 2 | 残りのうち、目的変数か、説明変数になりうる列に +inf・-inf がある行（2026-11-26 ユーザー判断） | `n_rows_with_infinite`、列ごとの行数は `infinite_by_column` |
+
+- 「説明変数になりうる列」は、列名で除外される列（目的変数、`time_column`・`group_column`、`exclude_columns`、使えないセンサ）を除いた浮動小数の列。列名で除外される列の無限大では行を外さない。
+- 無限大の判定は、欠損率などで列を除外する前に行う。そのため、あとで `high_missing` などで除外される列の無限大でも行は外れる。無限大が多い列は `infinite_by_column` で見つけ、`exclude_columns` か `unavailable-sensors.json` で外す。
+- 1 行も残らなければエラーで止める（終了コード 2）。
+- 予測時（`model.pkl` の `predict`）は行を外せない（行ごとに予測を返すため）。入力に無限大があると scikit-learn の `ValueError` になる（未決 18）。
 
 ### 列の除外
 
@@ -128,10 +165,11 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | `non_numeric` | 数値でも真偽値でもない列（案）。真偽値は 0/1 の数値として扱う |
 | `all_null` | すべて欠損の列 |
 | `constant` | 欠損を除いて値が 1 種類の列 |
-| `high_missing` | 欠損率がしきい値（案: 0.5）を超える列 |
+| `high_missing` | 欠損率が `config/settings.toml` の `max_missing_rate`（既定 0.5）を超える列 |
 
 - 浮動小数の列の NaN は欠損として扱う。
-- 目的変数が欠損している行は、学習と評価から外す（案）。使った行数を `run.json` の `data.n_rows_used` に残す。
+- 欠損率は、学習に使う行（「行の除外」の後）で計算する。
+- `high_missing` に当たらない欠損は、Pipeline の中で中央値で補完する（「モデル」）。
 - `time_column`・`group_column` に欠損があれば、分割できないのでエラーで止める（終了コード 2）。
 
 ### CV
@@ -208,7 +246,10 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 {
   "mloom_version": "0.1.0",
   "created_at": "2026-11-26T10:00:00+09:00",
-  "data": {"path": "data/train.parquet", "n_rows": 12000, "n_rows_used": 11950, "n_columns": 320},
+  "data": {
+    "path": "data/train.parquet", "n_rows": 12000, "n_columns": 320, "n_rows_used": 11940,
+    "n_rows_without_target": 50, "n_rows_with_infinite": 10, "infinite_by_column": {"TI-115": 10}
+  },
   "target": "quality",
   "task": "regression",
   "model": "ridge",
@@ -221,6 +262,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
     "sensors": {"TI-101": "2026-10 から故障中", "FI-205": "廃止"},
     "not_in_data": ["FI-205"]
   },
+  "settings": {"path": "config/settings.toml", "found": true, "max_missing_rate": 0.5},
   "excluded_columns": [
     {"name": "timestamp", "reason": "role", "detail": null},
     {"name": "TI-101", "reason": "unavailable_sensor", "detail": "2026-10 から故障中"},
@@ -276,7 +318,7 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | --- | --- |
 | 0 | 成功。`model.pkl` と `run.json` を保存した |
 | 1 | 想定外のエラー |
-| 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`） |
+| 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`、`settings.toml`） |
 
 ## Skill
 
@@ -316,6 +358,8 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | `mloom.models` | モデルのレジストリ（推定器、標準化の要否、探索空間） |
 | `mloom.data` | データの読み込み |
 | `mloom.sensors` | `unavailable-sensors.json` の読み込み |
+| `mloom.settings` | `settings.toml` の読み込み |
+| `mloom.rows` | 学習に使う行の選択（目的変数の欠損、無限大） |
 | `mloom.columns` | 列の除外と理由の記録 |
 | `mloom.cv` | ユーザーが指定した CV の分割 |
 | `mloom.pipeline` | Pipeline の組み立てと `ColumnSelector` |
@@ -344,6 +388,8 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 | 15 | 複数の目的変数 | 「まずは 1 個」の次の段階で、目的変数ごとに別の Pipeline を作るか、1 つのモデルで同時に予測するか |
 | 16 | pickle の読み込みに mloom が要る | 予測する環境にも mloom を入れる前提でよいか。避けるなら `ColumnSelector` をやめ、scikit-learn の `ColumnTransformer` で列を選ぶ（polars の表の扱いを確かめる必要がある） |
 | 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、`run.json` と標準エラーに警告を出すか |
+| 18 | 予測時の無限大 | 予測時は行を外せないので、今は scikit-learn の `ValueError` になる。欠損とみなして補完するか、エラーのままにするか |
+| 19 | 標準化（と補完）に使う行 | `ridge`・`pls` の標準化の平均・標準偏差を、目的変数が欠損している行も含めて計算するか（2026-11-26 ユーザー提案）。CV では評価側に当たる行（時系列なら評価期間以降、Group なら評価側のグループ）を除く必要がある。欠損の補完の中央値も同じ扱いにするか |
 
 ## 完了条件（v0.1、案）
 

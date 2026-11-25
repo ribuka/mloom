@@ -57,6 +57,7 @@ def make_config() -> Callable[..., Config]:
             "n_trials": 3,
             "exclude_columns": ("y", "c"),
             "unavailable_sensors": None,
+            "settings": None,
         }
         values.update(overrides)
         return Config(**values)

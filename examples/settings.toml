@@ -1,0 +1,5 @@
+# Example of config/settings.toml. Every key is optional; a missing key uses its default.
+
+[columns]
+# A feature column whose missing rate is above this is excluded (high_missing). 0 to 1; default 0.5.
+max_missing_rate = 0.5

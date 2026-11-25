@@ -13,8 +13,6 @@ from mloom.errors import InputError
 from mloom.pipeline import as_float
 from mloom.sensors import UnavailableSensors
 
-HIGH_MISSING_RATE = 0.5
-
 
 @dataclass(frozen=True)
 class ExcludedColumn:
@@ -82,17 +80,22 @@ def check_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSenso
             raise InputError(f"column {name!r} has missing values")
 
 
-def plan_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSensors) -> ColumnPlan:
+def plan_columns(
+    frame: pl.DataFrame, config: Config, sensors: UnavailableSensors, max_missing_rate: float
+) -> ColumnPlan:
     """Decide the feature candidates.
 
     Parameters
     ----------
     frame : pl.DataFrame
-        The rows used for training (rows without a target already removed).
+        The training rows (``mloom.rows.select_rows``).
     config : Config
         The config of the run.
     sensors : UnavailableSensors
         The unavailable sensors.
+    max_missing_rate : float
+        A column whose missing rate is above this is excluded as
+        ``high_missing``.
 
     Returns
     -------
@@ -107,7 +110,7 @@ def plan_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSensor
     candidates: list[str] = []
     excluded: list[ExcludedColumn] = []
     for name in frame.columns:
-        reason = _exclusion_reason(frame, name, config, sensors)
+        reason = name_reason(name, config, sensors) or _value_reason(frame, name, max_missing_rate)
         if reason is None:
             candidates.append(name)
         else:
@@ -118,9 +121,23 @@ def plan_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSensor
     return ColumnPlan(candidates=candidates, excluded=excluded, sensors_not_in_data=not_in_data)
 
 
-def _exclusion_reason(
-    frame: pl.DataFrame, name: str, config: Config, sensors: UnavailableSensors
-) -> ExcludedColumn | None:
+def name_reason(name: str, config: Config, sensors: UnavailableSensors) -> ExcludedColumn | None:
+    """Exclude a column for its name: target, role, user excluded, or unavailable sensor.
+
+    Parameters
+    ----------
+    name : str
+        Column name.
+    config : Config
+        The config of the run.
+    sensors : UnavailableSensors
+        The unavailable sensors.
+
+    Returns
+    -------
+    ExcludedColumn | None
+        The exclusion, or ``None`` when the name does not exclude the column.
+    """
     if name == config.target:
         return ExcludedColumn(name, "target")
     if name in config.role_columns:
@@ -129,12 +146,13 @@ def _exclusion_reason(
         return ExcludedColumn(name, "user_excluded")
     if name in sensors.reasons:
         return ExcludedColumn(name, "unavailable_sensor", sensors.reasons[name])
-    if not (frame.schema[name].is_numeric() or frame.schema[name] == pl.Boolean):
-        return ExcludedColumn(name, "non_numeric", str(frame.schema[name]))
-    return _value_reason(frame, name)
+    return None
 
 
-def _value_reason(frame: pl.DataFrame, name: str) -> ExcludedColumn | None:
+def _value_reason(frame: pl.DataFrame, name: str, max_missing_rate: float) -> ExcludedColumn | None:
+    dtype = frame.schema[name]
+    if not (dtype.is_numeric() or dtype == pl.Boolean):
+        return ExcludedColumn(name, "non_numeric", str(dtype))
     values = frame.select(as_float(name)).to_series()
     n_missing = values.null_count()
     if n_missing == frame.height:
@@ -142,7 +160,7 @@ def _value_reason(frame: pl.DataFrame, name: str) -> ExcludedColumn | None:
     if values.drop_nulls().n_unique() == 1:
         return ExcludedColumn(name, "constant")
     rate = n_missing / frame.height
-    if rate > HIGH_MISSING_RATE:
+    if rate > max_missing_rate:
         return ExcludedColumn(name, "high_missing", f"{rate:.3f}")
     return None
 

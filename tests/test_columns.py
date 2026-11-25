@@ -25,7 +25,7 @@ def test_each_column_gets_its_reason(frame: pl.DataFrame, make_config: Callable[
         sparse=pl.Series(np.where(np.arange(frame.height) % 4 == 0, np.arange(frame.height), np.nan)),
     )
     config = make_config(cv="group", group_column="lot", exclude_columns=("c", "s5"))
-    plan = plan_columns(data, config, _sensors(s4="故障", gone=None))
+    plan = plan_columns(data, config, _sensors(s4="故障", gone=None), 0.5)
     reasons = {column.name: column.reason for column in plan.excluded}
     assert reasons == {
         "y": "target",
@@ -44,7 +44,7 @@ def test_each_column_gets_its_reason(frame: pl.DataFrame, make_config: Callable[
 
 def test_unavailable_sensor_keeps_its_reason(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
     """The reason in the JSON file is kept as the detail."""
-    plan = plan_columns(frame, make_config(), _sensors(s0="故障"))
+    plan = plan_columns(frame, make_config(), _sensors(s0="故障"), 0.5)
     [excluded] = [column for column in plan.excluded if column.name == "s0"]
     assert excluded.detail == "故障"
 
@@ -53,7 +53,7 @@ def test_no_candidate_raises(frame: pl.DataFrame, make_config: Callable[..., Con
     """When every column is excluded, ``InputError`` is raised."""
     config = make_config(exclude_columns=("t", "s0", "s1", "s2", "s3", "s4", "s5", "c"))
     with pytest.raises(InputError, match="no column is left"):
-        plan_columns(frame, config, NO_SENSORS)
+        plan_columns(frame, config, NO_SENSORS, 0.5)
 
 
 @pytest.mark.parametrize(

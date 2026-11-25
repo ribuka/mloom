@@ -12,7 +12,13 @@ import traceback
 from pathlib import Path
 
 import mloom
-from mloom.config import CV_METHODS, DEFAULT_UNAVAILABLE_SENSORS, TASKS, Config
+from mloom.config import (
+    CV_METHODS,
+    DEFAULT_SETTINGS,
+    DEFAULT_UNAVAILABLE_SENSORS,
+    TASKS,
+    Config,
+)
 from mloom.errors import InputError
 from mloom.metrics import METRICS
 from mloom.models import MODELS
@@ -54,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_UNAVAILABLE_SENSORS,
         help=f"JSON of sensors not to use (default: {DEFAULT_UNAVAILABLE_SENSORS})",
     )
+    optimize.add_argument(
+        "--settings",
+        type=Path,
+        default=DEFAULT_SETTINGS,
+        help=f"TOML of tunable values such as max_missing_rate (default: {DEFAULT_SETTINGS})",
+    )
     optimize.add_argument("--n-trials", type=int, default=100)
     optimize.add_argument("--timeout", type=float, help="seconds")
     optimize.add_argument("--seed", type=int, default=0)
@@ -89,6 +101,7 @@ def to_config(args: argparse.Namespace) -> Config:
         metric=args.metric,
         exclude_columns=tuple(args.exclude_columns),
         unavailable_sensors=args.unavailable_sensors,
+        settings=args.settings,
         n_trials=args.n_trials,
         timeout=args.timeout,
         seed=args.seed,

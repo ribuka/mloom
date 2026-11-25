@@ -19,7 +19,9 @@ from mloom.errors import InputError, OptimizationError
 from mloom.metrics import BINARY_ONLY_METRICS
 from mloom.pipeline import as_float, build_pipeline, to_matrix
 from mloom.result import DataSummary, Result
+from mloom.rows import select_rows
 from mloom.sensors import load_unavailable_sensors
+from mloom.settings import load_settings
 
 K_PARAM = "k"
 
@@ -43,17 +45,20 @@ def optimize_model(data: Data, config: Config) -> Result:
     Raises
     ------
     InputError
-        When the data or ``unavailable-sensors.json`` does not fit the config.
+        When the data, ``unavailable-sensors.json`` or ``settings.toml`` is
+        invalid or does not fit the config.
         Raised before any model is fitted.
     OptimizationError
         When no trial of the search finished with a score.
     """
     frame, path = load_data(data)
     sensors = load_unavailable_sensors(config.unavailable_sensors)
+    settings = load_settings(config.settings)
     check_columns(frame, config, sensors)
-    rows = order_rows(_rows_with_target(frame, config), config)
+    training = select_rows(frame, config, sensors)
+    rows = order_rows(training.frame, config)
     y = _target(rows, config)
-    columns = plan_columns(rows, config, sensors)
+    columns = plan_columns(rows, config, sensors, settings.max_missing_rate)
     cv_plan = plan_cv(rows, y, config)
 
     study = _search(config, to_matrix(rows, columns.candidates), y, cv_plan)
@@ -67,8 +72,17 @@ def optimize_model(data: Data, config: Config) -> Result:
     return Result(
         pipeline=pipeline,
         config=config,
-        data=DataSummary(path=path, n_rows=frame.height, n_rows_used=rows.height, n_columns=frame.width),
+        data=DataSummary(
+            path=path,
+            n_rows=frame.height,
+            n_columns=frame.width,
+            n_rows_used=rows.height,
+            n_rows_without_target=training.n_without_target,
+            n_rows_with_infinite=training.n_with_infinite,
+            infinite_by_column=training.infinite_by_column,
+        ),
         sensors=sensors,
+        settings=settings,
         columns=columns,
         selected_columns=[name for name, kept in zip(columns.candidates, keep, strict=True) if kept],
         best_params=best.params,
@@ -77,16 +91,6 @@ def optimize_model(data: Data, config: Config) -> Result:
         hpo=_describe_search(study, config),
         created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
     )
-
-
-def _rows_with_target(frame: pl.DataFrame, config: Config) -> pl.DataFrame:
-    target = pl.col(config.target)
-    if frame.schema[config.target].is_float():
-        target = target.fill_nan(None)
-    rows = frame.filter(target.is_not_null())
-    if rows.height == 0:
-        raise InputError(f"target {config.target!r} has no values")
-    return rows
 
 
 def _target(rows: pl.DataFrame, config: Config) -> np.ndarray:

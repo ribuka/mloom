@@ -15,6 +15,8 @@ uv run mloom optimize data/sample.parquet --target quality --task regression --m
 
 - `outputs/quality-lightgbm/` に `model.pkl` と `run.json` ができます。
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
+- 同じく `--settings` を省くと `config/settings.toml` を読みます（無ければ既定値）。欠損率のしきい値 `max_missing_rate` などを変えられます。例は [examples/settings.toml](examples/settings.toml) です。
+- 目的変数が欠損している行と、無限大（+inf・-inf）がある行は学習から外し、行数を `run.json` の `data` に残します。
 - 分類は `--target grade --task classification --exclude-columns quality`、Group の CV は `--cv group --group-column lot` です。
 
 ## 入力

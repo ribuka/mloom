@@ -90,11 +90,30 @@ def test_pipeline_ignores_extra_columns_and_order(frame: pl.DataFrame, make_conf
     np.testing.assert_allclose(result.pipeline.predict(shuffled), result.pipeline.predict(frame))
 
 
-def test_rows_without_target_are_dropped(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
-    """Rows whose target is null or NaN are left out and counted."""
-    data = frame.with_columns(y=pl.when(pl.col("t") < 6).then(float("nan")).otherwise(pl.col("y")))
-    result = optimize_model(data, make_config())
-    assert result.data.n_rows_used == frame.height - 6
+def test_dropped_rows_are_recorded(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+    """Rows whose target is missing, or with +-inf, are left out and counted in ``run.json``."""
+    data = frame.with_columns(
+        y=pl.when(pl.col("t") < 6).then(float("nan")).otherwise(pl.col("y")),
+        s2=pl.when(pl.col("t") == 10).then(float("inf")).otherwise(pl.col("s2")),
+    )
+    run = optimize_model(data, make_config()).to_dict()["data"]
+    assert run["n_rows_without_target"] == 6
+    assert run["n_rows_with_infinite"] == 1
+    assert run["infinite_by_column"] == {"s2": 1}
+    assert run["n_rows_used"] == frame.height - 7
+
+
+@pytest.mark.parametrize(("rate", "excluded"), [(0.5, False), (0.2, True)])
+def test_max_missing_rate_comes_from_settings(
+    frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, rate: float, excluded: bool
+) -> None:
+    """``max_missing_rate`` in ``settings.toml`` decides whether a column with 25% missing is excluded."""
+    data = frame.with_columns(s2=pl.when(pl.col("t") % 4 == 0).then(None).otherwise(pl.col("s2")))
+    settings = tmp_path / "settings.toml"
+    settings.write_text(f"[columns]\nmax_missing_rate = {rate}\n", encoding="utf-8")
+    run = optimize_model(data, make_config(settings=settings)).to_dict()
+    assert ({"name": "s2", "reason": "high_missing", "detail": "0.250"} in run["excluded_columns"]) is excluded
+    assert run["settings"] == {"path": str(settings), "found": True, "max_missing_rate": rate}
 
 
 @pytest.mark.parametrize(
