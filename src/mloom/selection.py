@@ -5,7 +5,8 @@ they are computed once, before the CV split, on the statistic rows. The
 ranking uses the target, so it is computed on the labeled training rows only:
 once for each CV fold (and reused by every trial), and once for the final
 model. It keeps one representative of each cluster, and a trial keeps the top
-``k`` representatives.
+``k`` representatives. Only the numeric candidates are clustered and ranked;
+a trial keeps each categorical candidate or not by its ``use:<column>``.
 """
 
 import warnings
@@ -15,9 +16,12 @@ import numpy as np
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 from scipy.stats import rankdata
+from sklearn.compose import ColumnTransformer
 from sklearn.feature_selection import f_classif, f_regression
 from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
+
+from mloom.models import K_PARAM, Params, use_param
+from mloom.pipeline import n_numeric_columns
 
 # A pair is correlated only when both columns have a value on this many rows.
 MIN_PAIRED_ROWS = 3
@@ -72,7 +76,8 @@ def correlation_clusters(x: np.ndarray, max_correlation: float) -> list[list[int
     Parameters
     ----------
     x : np.ndarray
-        The candidate columns on the statistic rows, before the preprocessing.
+        The numeric candidate columns on the statistic rows, before the
+        preprocessing.
     max_correlation : float
         From 0 to 1; 1 clusters nothing.
 
@@ -85,7 +90,7 @@ def correlation_clusters(x: np.ndarray, max_correlation: float) -> list[list[int
     """
     n_columns = x.shape[1]
     if n_columns < 2:  # linkage needs two columns
-        return [list(range(n_columns))]
+        return [[i] for i in range(n_columns)]
     rho = abs_spearman(x)
     distance = 1.0 - rho
     np.fill_diagonal(distance, 0.0)
@@ -116,18 +121,20 @@ def _subtrees(tree: np.ndarray, rho: np.ndarray) -> tuple[list[list[int]], list[
     return members, lowest
 
 
-def column_scores(task: str, preprocess: Pipeline, x: np.ndarray, y: np.ndarray, x_statistics: np.ndarray) -> np.ndarray:
-    """Score each column by its relation to the target, the higher the better.
+def column_scores(
+    task: str, preprocess: ColumnTransformer, x: np.ndarray, y: np.ndarray, x_statistics: np.ndarray
+) -> np.ndarray:
+    """Score each numeric candidate column by its relation to the target, the higher the better.
 
     Parameters
     ----------
     task : str
         ``"regression"`` (``f_regression``) or ``"classification"``
         (``f_classif``).
-    preprocess : Pipeline
+    preprocess : ColumnTransformer
         The fitted preprocessing; the columns are scored on its output.
     x : np.ndarray
-        Features of the labeled training rows.
+        Features of the labeled training rows (every candidate column).
     y : np.ndarray
         Target of those rows.
     x_statistics : np.ndarray
@@ -138,13 +145,17 @@ def column_scores(task: str, preprocess: Pipeline, x: np.ndarray, y: np.ndarray,
     Returns
     -------
     np.ndarray
-        The F statistic of each column; ``-inf`` for a NaN score (such as a
-        constant column).
+        The F statistic of each numeric candidate column; ``-inf`` for a NaN
+        score (such as a constant column). The codes of the categorical
+        candidates are not scored: their order means nothing.
     """
-    z = preprocess.transform(x)
+    numeric = slice(n_numeric_columns(preprocess))
+    z = preprocess.transform(x)[:, numeric]
+    if z.shape[1] == 0:  # no numeric candidate; the F statistics need a column
+        return np.empty(0)
     if np.isnan(z).any():
-        median = SimpleImputer(strategy="median", keep_empty_features=True).fit(preprocess.transform(x_statistics))
-        z = median.transform(z)
+        median = SimpleImputer(strategy="median", keep_empty_features=True)
+        z = median.fit(preprocess.transform(x_statistics)[:, numeric]).transform(z)
     score_func = f_regression if task == "regression" else f_classif
     with warnings.catch_warnings():
         # A constant column gives a NaN score, which scores it lowest below.
@@ -179,13 +190,13 @@ def rank_representatives(scores: np.ndarray, clusters: list[list[int]]) -> np.nd
 
 def rank_columns(
     task: str,
-    preprocess: Pipeline,
+    preprocess: ColumnTransformer,
     x: np.ndarray,
     y: np.ndarray,
     x_statistics: np.ndarray,
     clusters: list[list[int]],
 ) -> np.ndarray:
-    """Rank the representatives of the clusters by their relation to the target, best first.
+    """Rank the representatives of the clusters of the numeric candidates by their relation to the target, best first.
 
     Parameters
     ----------
@@ -226,6 +237,60 @@ def top_columns(ranking: np.ndarray, k: int) -> list[int]:
         The kept positions, in the order of the candidate columns.
     """
     return sorted(int(i) for i in ranking[:k])
+
+
+def keep_columns(params: Params, ranking: np.ndarray, categorical: list[str], n_numeric: int) -> list[int]:
+    """Tell the columns a trial or the final model keeps.
+
+    Parameters
+    ----------
+    params : Params
+        Parameters of the trial: ``k``, and ``use:<column>`` of each
+        categorical candidate column. Without them (no numeric candidate),
+        no numeric column and every categorical column is kept.
+    ranking : np.ndarray
+        The ranking of the numeric candidates (``rank_columns``).
+    categorical : list[str]
+        The categorical candidate columns.
+    n_numeric : int
+        Number of numeric candidate columns.
+
+    Returns
+    -------
+    list[int]
+        The positions, among the candidate columns, of the top ``k`` numeric
+        columns and of the categorical columns whose ``use:<column>`` is
+        true, in the order of the candidate columns.
+    """
+    used = [n_numeric + j for j, name in enumerate(categorical) if params.get(use_param(name), True)]
+    return [*top_columns(ranking, params.get(K_PARAM, 0)), *used]
+
+
+def selection_params(keep: list[int], categorical: list[str], n_numeric: int) -> Params:
+    """Tell the parameters of the feature selection that keep given columns, as ``keep_columns`` reads them.
+
+    Parameters
+    ----------
+    keep : list[int]
+        Positions, among the candidate columns, of the kept columns.
+    categorical : list[str]
+        The categorical candidate columns.
+    n_numeric : int
+        Number of numeric candidate columns.
+
+    Returns
+    -------
+    Params
+        ``k``, the number of kept numeric columns (left out when it is 0),
+        and ``use:<column>`` of each categorical column; nothing without a
+        numeric candidate, as the search then has neither.
+    """
+    if n_numeric == 0:
+        return {}
+    kept = set(keep)
+    params: Params = {use_param(name): n_numeric + j in kept for j, name in enumerate(categorical)}
+    n_kept = sum(i < n_numeric for i in kept)
+    return {K_PARAM: n_kept, **params} if n_kept else params
 
 
 def describe_selection(

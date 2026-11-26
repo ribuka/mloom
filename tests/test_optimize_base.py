@@ -191,3 +191,34 @@ def test_settings_of_the_base_are_kept_by_replace(
     recorded = result.to_dict()["settings"]
     assert recorded["clip"]["method"] == "iqr"
     assert [file["role"] for file in recorded["files"]] == ["base"]
+
+
+# The columns that leave x1, grade and shift of the graded data as the candidates.
+GRADED_TARGETS = ("t", "y", "c2", "c3")
+
+
+@pytest.mark.parametrize("exclude", [GRADED_TARGETS, (*GRADED_TARGETS, "x1")], ids=["with k", "without k"])
+def test_base_with_categorical_columns_is_tried_first(
+    graded: pl.DataFrame, base_of: Callable[..., Base], exclude: tuple[str, ...]
+) -> None:
+    """``use:<column>`` and ``cat_smooth`` of the base, and a base without ``k`` (no numeric candidate), are tried first."""
+    base = base_of(data=graded, model="lightgbm", exclude_columns=exclude)
+    assert "cat_smooth" in base.best_params
+    assert ("k" in base.best_params) is ("x1" not in exclude)
+    result = optimize_model(graded, replace(base.config, n_trials=1), base=base)
+    assert _record(result)["enqueued"] is True
+    assert result.best_params == base.best_params
+    assert result.selected_columns == base.selected_columns
+
+
+@pytest.mark.filterwarnings("ignore:column .* of the base is dropped:UserWarning")
+def test_parameters_of_categorical_columns_no_longer_candidates_are_not_tried(
+    graded: pl.DataFrame, base_of: Callable[..., Base]
+) -> None:
+    """Without the categorical candidates of the base, its ``use:<column>`` and ``cat_smooth`` are out of the search space."""
+    base = base_of(data=graded, model="lightgbm", exclude_columns=GRADED_TARGETS)
+    config = replace(base.config, n_trials=1, exclude_columns=(*GRADED_TARGETS, "grade", "shift"))
+    with pytest.warns(UserWarning, match=r"not tried first: cat_smooth=.*, use:grade=.*, use:shift=.* not in the search"):
+        result = optimize_model(graded, config, base=base)
+    assert _record(result)["enqueued"] is False
+    assert not any(name == "cat_smooth" or name.startswith("use:") for name in result.best_params)

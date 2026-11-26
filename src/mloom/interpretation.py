@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 from sklearn.base import is_classifier
+from sklearn.compose import ColumnTransformer
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import get_scorer
 from sklearn.pipeline import Pipeline
@@ -21,7 +22,12 @@ from mloom.config import Config
 from mloom.cv import Split
 from mloom.explain import is_linear, linear_weights
 from mloom.models import Params
-from mloom.pipeline import build_pipeline, estimator_input, selected_columns
+from mloom.pipeline import (
+    build_pipeline,
+    estimator_input,
+    numeric_preprocess,
+    selected_columns,
+)
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,7 @@ class FoldModels:
         Hyperparameters of the model, without ``k``.
     folds : list[Split]
         Train and test indices of the labeled rows of each fold.
-    prepared : list[tuple[Pipeline, list[int]]]
+    prepared : list[tuple[ColumnTransformer, list[int]]]
         The fitted preprocessing of each fold and the positions of the
         columns its model uses (``build_pipeline``), as the CV scores used
         them.
@@ -45,7 +51,7 @@ class FoldModels:
     config: Config
     params: Params
     folds: list[Split]
-    prepared: list[tuple[Pipeline, list[int]]]
+    prepared: list[tuple[ColumnTransformer, list[int]]]
 
 
 @dataclass(frozen=True)
@@ -67,7 +73,7 @@ class Importance:
 
 
 def importance_groups(keep: list[int], clusters: list[list[int]]) -> list[tuple[int, list[int]]]:
-    """Group each selected column with the columns of its cluster.
+    """Group each selected column with the columns of its cluster (a categorical column stays alone).
 
     Parameters
     ----------
@@ -81,10 +87,11 @@ def importance_groups(keep: list[int], clusters: list[list[int]]) -> list[tuple[
     list[tuple[int, list[int]]]
         For each selected column in the order of ``keep``, its position and
         the positions of every column of its cluster, in the order of the
-        candidate columns.
+        candidate columns; only its own position for a categorical column,
+        which is in no cluster.
     """
     cluster_of = {i: cluster for cluster in clusters for i in cluster}
-    return [(i, cluster_of[i]) for i in keep]
+    return [(i, cluster_of.get(i, [i])) for i in keep]
 
 
 def permutation_importance(
@@ -102,7 +109,9 @@ def permutation_importance(
         The models of the CV scores on the CV folds.
     data : tuple[np.ndarray, np.ndarray]
         The candidate columns of the labeled rows before the preprocessing
-        (``to_matrix``), and their target.
+        (``mloom.training.TrainingData.x``), and their target. A categorical
+        column is permuted as its codes, which is the same as permuting its
+        values, as each row is encoded alone.
     groups : list[tuple[int, list[int]]]
         The groups (``importance_groups``).
     candidates : list[str]
@@ -209,7 +218,8 @@ def linear_coefficients(pipeline: Pipeline, background: np.ndarray) -> dict[str,
         return None
     _, weights = linear_weights(estimator, background)
     keep = pipeline.named_steps["select"].transformers[0][2]
-    scale = pipeline.named_steps["preprocess"].estimator.named_steps["scale"].scale_[keep]
+    # A linear model has no categorical column, so every kept column is numeric.
+    scale = numeric_preprocess(pipeline.named_steps["preprocess"].estimator).named_steps["scale"].scale_[keep]
     names = selected_columns(pipeline)
     classifier = is_classifier(estimator)
     # One output for regression and for 2 classes (those of classes_[1]), one for each class otherwise.

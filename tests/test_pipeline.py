@@ -4,17 +4,25 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import pytest
+from sklearn.pipeline import Pipeline
 
+from mloom.categorical import encode, fit_encoder
 from mloom.clip import describe_clip
 from mloom.config import Config
 from mloom.errors import InputError
 from mloom.models import MODELS
 from mloom.pipeline import (
     Preprocessing,
+    build_pipeline,
+    fit_fold_preprocess,
     fit_preprocess,
     fitted_clip_bounds,
+    numeric_preprocess,
     plan_preprocessing,
+    select_columns,
+    to_matrix,
 )
 from mloom.settings import ClipSettings, load_settings
 
@@ -59,7 +67,7 @@ SIGMA_A = 2.0 * np.sqrt(1522.0)
 )
 def test_clip_bounds_match_the_hand_computed_ones(method: str, expected: list[tuple[float, float]]) -> None:
     """Each method bounds the finite values as the spec says; a column without spread or values is not clipped."""
-    preprocess = fit_preprocess(_preprocessing(_clip(method)), X)
+    preprocess = fit_preprocess(_preprocessing(_clip(method)), X, X.shape[1])
     bounds = fitted_clip_bounds(preprocess)
     assert bounds is not None
     np.testing.assert_allclose(np.column_stack(bounds), np.array(expected))
@@ -79,8 +87,8 @@ def test_clip_bounds_match_the_hand_computed_ones(method: str, expected: list[tu
 
 def test_no_clip_step_without_a_method() -> None:
     """``none`` adds no clipping step; its record has no bounds."""
-    preprocess = fit_preprocess(_preprocessing(_clip("none")), X)
-    assert list(preprocess.named_steps) == ["infinite"]
+    preprocess = fit_preprocess(_preprocessing(_clip("none")), X, X.shape[1])
+    assert list(numeric_preprocess(preprocess).named_steps) == ["infinite"]
     assert fitted_clip_bounds(preprocess) is None
     assert describe_clip("none", None, COLUMNS) == {"method": "none", "bounds": {}, "unclipped_columns": []}
 
@@ -95,7 +103,7 @@ def test_no_clip_step_without_a_method() -> None:
 )
 def test_imputation_fills_the_infinite_values_too(impute: str, expected: list[float]) -> None:
     """+-inf is filled like a missing value, from the finite values only; a column without values keeps 0."""
-    preprocess = fit_preprocess(_preprocessing(_clip("none"), impute), X[:5])
+    preprocess = fit_preprocess(_preprocessing(_clip("none"), impute), X[:5], X.shape[1])
     out = preprocess.transform(np.array([[INF, NAN, -INF, NAN, INF]]))
     np.testing.assert_allclose(out[0], expected)
 
@@ -103,7 +111,7 @@ def test_imputation_fills_the_infinite_values_too(impute: str, expected: list[fl
 @pytest.mark.parametrize("impute", ["most_frequent", "knn", "iterative"])
 def test_other_imputations_leave_no_missing_value(impute: str) -> None:
     """``most_frequent``, ``knn`` and ``iterative`` fill every column, keeping their number."""
-    preprocess = fit_preprocess(_preprocessing(_clip("iqr"), impute), X)
+    preprocess = fit_preprocess(_preprocessing(_clip("iqr"), impute), X, X.shape[1])
     out = preprocess.transform(X)
     assert out.shape == X.shape
     assert not np.isnan(out).any()
@@ -152,3 +160,55 @@ def test_lightgbm_estimator_has_the_fixed_arguments(task: str) -> None:
         "verbose": -1,
         "num_leaves": 16,
     }
+
+
+def _categorical_pipeline(frame: pl.DataFrame, config: Config) -> Pipeline:
+    # x1 and grade, with grade encoded on the rows of frame, fitted on them.
+    encoder = fit_encoder([frame], ["grade"])
+    x = np.hstack([to_matrix(frame, ["x1"]), encode(encoder, frame, ["grade"])])
+    preprocess = fit_preprocess(plan_preprocessing(config, load_settings(None)), x, 1)
+    params = {"num_leaves": 8, "learning_rate": 0.1, "n_estimators": 50, "min_child_samples": 5, "subsample": 1.0,
+              "colsample_bytree": 1.0, "reg_lambda": 1e-3, "cat_smooth": 1.0}  # fmt: skip
+    pipeline = build_pipeline(config, params, preprocess, [0, 1], select_columns(["x1"], ["grade"], encoder))
+    return pipeline.fit(frame, frame["y"].to_numpy())
+
+
+@pytest.mark.parametrize(
+    "dtype", [pl.String, pl.Categorical, pl.Enum(["A", "B", "C", "D"])], ids=["string", "categorical", "enum"]
+)
+def test_categorical_pipeline_fits_and_predicts_each_string_type(
+    graded: pl.DataFrame, make_config: Callable[..., Config], dtype: pl.DataType
+) -> None:
+    """A pipeline with a categorical column fits and predicts with it as String, Categorical or Enum.
+
+    The column is a categorical feature of LightGBM, and a model fitted on String predicts the same from Categorical.
+    """
+    config = make_config(model="lightgbm")
+    frame = graded.with_columns(pl.col("grade").cast(dtype))
+    pipeline = _categorical_pipeline(frame, config)
+    assert pipeline[-1].get_params()["categorical_column"] == [1]
+    assert np.isfinite(pipeline.predict(frame)).all()
+
+    from_strings = _categorical_pipeline(graded, config)
+    np.testing.assert_array_equal(from_strings.predict(frame), from_strings.predict(graded))
+
+
+def test_fold_encoding_is_that_of_an_encoder_of_the_strings_of_the_fold(make_config: Callable[..., Config]) -> None:
+    """Encoding the codes again with the categories of a fold gives the codes of an encoder fitted on its strings.
+
+    A value not on the rows of the fold, and a column without a value there, become NaN.
+    """
+    frame = pl.DataFrame({"g": ["d", "a", "c", "b", None, "a"], "h": ["x", "y", "x", None, "y", "x"]})
+    columns = ["g", "h"]
+    codes = encode(fit_encoder([frame], columns), frame, columns)
+    fold = frame.head(3).with_columns(h=pl.lit(None, dtype=pl.String))
+    fold_codes = codes[:3].copy()
+    fold_codes[:, 1] = np.nan
+    preprocessing = plan_preprocessing(make_config(model="lightgbm"), load_settings(None))
+    preprocess = fit_fold_preprocess(preprocessing, fold_codes, 0)
+
+    expected = encode(fit_encoder([fold], ["g"]), frame, ["g"])
+    out = preprocess.transform(codes)
+    np.testing.assert_array_equal(out[:, 0], expected[:, 0])
+    assert np.isnan(out[[3, 4], 0]).all()  # b is not on the rows of the fold, and null
+    assert np.isnan(out[:, 1]).all()

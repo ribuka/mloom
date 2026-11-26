@@ -204,13 +204,18 @@ np.save(sys.argv[3], bundle["pipeline"].predict(pl.read_parquet(sys.argv[2])))
 """
 
 
+# Every column of the shared frame but the string lot, which is then the only candidate (a categorical one).
+ALL_BUT_LOT = ("y", "c", "t", "s0", "s1", "s2", "s3", "s4", "s5", "const")
+
+
 @pytest.mark.parametrize(
-    ("model", "task", "target", "settings"),
+    ("model", "task", "target", "settings", "exclude"),
     [
-        ("ridge", "regression", "y", ""),
-        ("random_forest", "classification", "c", ""),
-        ("ridge", "regression", "y", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'knn'\n"),
-        ("lightgbm", "classification", "c", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'iterative'\n"),
+        ("ridge", "regression", "y", "", ("y", "c")),
+        ("random_forest", "classification", "c", "", ("y", "c")),
+        ("ridge", "regression", "y", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'knn'\n", ("y", "c")),
+        ("lightgbm", "classification", "c", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'iterative'\n", ("y", "c")),
+        ("lightgbm", "regression", "y", "", ALL_BUT_LOT),
     ],
 )
 def test_model_pkl_is_read_and_predicts_without_mloom(
@@ -221,10 +226,12 @@ def test_model_pkl_is_read_and_predicts_without_mloom(
     task: str,
     target: str,
     settings: str,
+    exclude: tuple[str, ...],
 ) -> None:
     """A Python that cannot import mloom reads ``model.pkl`` and predicts what mloom predicts.
 
-    It holds with the clipping and the imputations that use the other columns, and with +-inf and NaN.
+    It holds with the clipping and the imputations that use the other columns, with +-inf and NaN, and with a
+    categorical column.
     """
     data = frame.with_columns(
         s0=pl.when(pl.col("t") % 9 == 0).then(float("-inf")).otherwise(pl.col("s0")),
@@ -232,7 +239,8 @@ def test_model_pkl_is_read_and_predicts_without_mloom(
     )
     settings_path = tmp_path / "mloom.toml"
     settings_path.write_text(settings, encoding="utf-8")
-    result = optimize_model(data, make_config(model=model, task=task, target=target, settings=settings_path))
+    config = make_config(model=model, task=task, target=target, settings=settings_path, exclude_columns=exclude)
+    result = optimize_model(data, config)
     result.save(tmp_path)
     data.write_parquet(tmp_path / "data.parquet")
     with (tmp_path / "model.pkl").open("rb") as file:
@@ -638,3 +646,46 @@ def test_shap_contributions_add_up_to_the_output(
     for index in range(len(classes)):
         total = rows.select(names[index * width : (index + 1) * width]).to_numpy().sum(axis=1)
         np.testing.assert_allclose(total, expected[:, index], rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("task", "target", "exclude"),
+    [
+        ("regression", "y", ("t", "x1")),
+        ("classification", "c2", ("t", "x1")),
+        ("classification", "c3", ("t", "x1")),
+        ("regression", "y", ("t",)),
+        ("classification", "c2", ("t",)),
+        ("classification", "c3", ("t",)),
+    ],
+)
+def test_shap_contributions_of_categorical_columns_add_up_to_the_output(
+    graded: pl.DataFrame, make_config: Callable[..., Config], task: str, target: str, exclude: tuple[str, ...]
+) -> None:
+    """With categorical columns (alone or with a numeric one), ``shap_base`` plus the contributions is the output."""
+    exclude_columns = (*exclude, "y", "c2", "c3")
+    # Without a numeric candidate, every categorical column is used.
+    result = optimize_model(graded, make_config(model="lightgbm", task=task, target=target, exclude_columns=exclude_columns))
+    assert {"grade", "shift"} & set(result.selected_columns)
+    output = predict(result.model_bundle(), graded, shap=True)
+    names = [name for name in output.columns if name.startswith("shap_")]
+    classes = len(result.pipeline.classes_) if target == "c3" else 1
+    expected = _model_output(result.pipeline[-1], estimator_input(result.pipeline, graded))
+    width = len(names) // classes
+    assert width == len(result.selected_columns) + 1
+    for index in range(classes):
+        total = output.select(names[index * width : (index + 1) * width]).to_numpy().sum(axis=1)
+        np.testing.assert_allclose(total, expected[:, index], rtol=0, atol=1e-6)
+
+
+def test_unseen_and_null_categories_are_predicted_as_missing(
+    graded: pl.DataFrame, make_config: Callable[..., Config]
+) -> None:
+    """A value of a categorical column not seen in training, and null, predict the same finite value."""
+    result = optimize_model(graded, make_config(model="lightgbm", exclude_columns=("t", "x1", "y", "c2", "c3")))
+    assert "grade" in result.selected_columns
+    row = graded.head(1)
+    table = pl.concat([row.with_columns(grade=pl.lit("UNSEEN")), row.with_columns(grade=pl.lit(None, dtype=pl.String))])
+    prediction = predict(result.model_bundle(), table)["prediction"].to_numpy()
+    assert np.isfinite(prediction).all()
+    assert prediction[0] == prediction[1]

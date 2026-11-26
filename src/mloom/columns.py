@@ -1,5 +1,7 @@
 """Excluding columns before feature selection, recording why each was excluded.
 
+The columns left are the feature candidates, numeric or categorical.
+
 The reasons and their order are those of "列の除外" in ``docs/spec.md``;
 a column gets the first reason that applies.
 """
@@ -9,9 +11,14 @@ from dataclasses import dataclass
 import polars as pl
 
 from mloom.config import Config
+from mloom.dtypes import BOOLEAN, NUMBER, STRING, value_kind
 from mloom.errors import InputError
 from mloom.pipeline import as_float
 from mloom.sensors import UnavailableSensors
+
+# The kinds of feature candidates (``ColumnPlan.numeric`` and ``ColumnPlan.categorical``).
+NUMERIC = "numeric"
+CATEGORICAL = "categorical"
 
 
 @dataclass(frozen=True)
@@ -40,17 +47,33 @@ class ColumnPlan:
 
     Parameters
     ----------
-    candidates : list[str]
-        Feature candidates, in the order of the data.
+    numeric : list[str]
+        Numeric and boolean feature candidates, in the order of the data.
+    categorical : list[str]
+        String, Categorical and Enum feature candidates, in the order of the
+        data; empty unless the model ``handles_categorical``.
     excluded : list[ExcludedColumn]
         Excluded columns, in the order of the data.
     sensors_not_in_data : list[str]
         Unavailable sensors that are not columns of the data.
     """
 
-    candidates: list[str]
+    numeric: list[str]
+    categorical: list[str]
     excluded: list[ExcludedColumn]
     sensors_not_in_data: list[str]
+
+    @property
+    def candidates(self) -> list[str]:
+        """All the feature candidates: the numeric ones, then the categorical ones.
+
+        Returns
+        -------
+        list[str]
+            The candidates, in the order of the columns of the feature
+            matrix, of the input of the estimator and of the record.
+        """
+        return [*self.numeric, *self.categorical]
 
 
 def check_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSensors) -> None:
@@ -126,18 +149,26 @@ def plan_columns(
     -------
     ColumnPlan
         The candidates and the excluded columns with their reasons. The
-        candidates may be empty (``require_candidates``).
+        candidates may be empty (``require_candidates``). String,
+        Categorical and Enum columns are categorical candidates when the
+        model ``handles_categorical``, and ``non_numeric`` otherwise.
     """
-    candidates: list[str] = []
+    candidates: dict[str, list[str]] = {NUMERIC: [], CATEGORICAL: []}
     excluded: list[ExcludedColumn] = []
     for name in frame.columns:
-        reason = name_reason(name, config, sensors) or _value_reason(frame, unlabeled, name, max_missing_rate)
-        if reason is None:
-            candidates.append(name)
-        else:
+        kind = _feature_kind(frame.schema[name], config.model_spec.handles_categorical)
+        reason = name_reason(name, config, sensors) or _value_reason(frame, unlabeled, name, kind, max_missing_rate)
+        if reason is not None:
             excluded.append(reason)
+        elif kind is not None:  # always: a column without a kind is non_numeric
+            candidates[kind].append(name)
     not_in_data = [name for name in sensors.reasons if name not in frame.columns]
-    return ColumnPlan(candidates=candidates, excluded=excluded, sensors_not_in_data=not_in_data)
+    return ColumnPlan(
+        numeric=candidates[NUMERIC],
+        categorical=candidates[CATEGORICAL],
+        excluded=excluded,
+        sensors_not_in_data=not_in_data,
+    )
 
 
 def require_candidates(plan: ColumnPlan) -> None:
@@ -185,21 +216,31 @@ def name_reason(name: str, config: Config, sensors: UnavailableSensors) -> Exclu
     return None
 
 
+def _feature_kind(dtype: pl.DataType, handles_categorical: bool) -> str | None:
+    # NUMERIC or CATEGORICAL for a column of the type, or None when it cannot be a feature (non_numeric).
+    kind = value_kind(dtype)
+    if kind in (NUMBER, BOOLEAN):
+        return NUMERIC
+    if kind == STRING and handles_categorical:
+        return CATEGORICAL
+    return None
+
+
 def _value_reason(
-    frame: pl.DataFrame, unlabeled: pl.DataFrame, name: str, max_missing_rate: float
+    frame: pl.DataFrame, unlabeled: pl.DataFrame, name: str, kind: str | None, max_missing_rate: float
 ) -> ExcludedColumn | None:
     # all_null and constant look at the labeled rows: the model learns from them only.
-    dtype = frame.schema[name]
-    if not (dtype.is_numeric() or dtype == pl.Boolean):
-        return ExcludedColumn(name, "non_numeric", str(dtype))
-    values = frame.select(_feature(name)).to_series()
+    if kind is None:
+        return ExcludedColumn(name, "non_numeric", str(frame.schema[name]))
+    feature = _feature(name) if kind == NUMERIC else pl.col(name).cast(pl.String)
+    values = frame.select(feature).to_series()
     n_missing = values.null_count()
     if n_missing == frame.height:
         return ExcludedColumn(name, "all_null")
     if values.drop_nulls().n_unique() == 1:
         return ExcludedColumn(name, "constant")
     labeled_rate = n_missing / frame.height
-    n_missing_all = n_missing + unlabeled.select(_feature(name).null_count()).item()
+    n_missing_all = n_missing + unlabeled.select(feature.null_count()).item()
     all_rate = n_missing_all / (frame.height + unlabeled.height)
     if max(labeled_rate, all_rate) > max_missing_rate:
         return ExcludedColumn(name, "high_missing", f"labeled {labeled_rate:.3f}, all {all_rate:.3f}")

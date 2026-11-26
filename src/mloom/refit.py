@@ -16,9 +16,10 @@ from mloom.data import Data
 from mloom.errors import InputError
 from mloom.filters import Condition
 from mloom.fixed_cv import fixed_fold_models, fixed_fold_scores
-from mloom.models import K_PARAM, model_params
+from mloom.models import model_params
 from mloom.pipeline import fit_preprocess
 from mloom.result import Result
+from mloom.selection import selection_params
 from mloom.settings import load_settings
 from mloom.training import FinalModel, fit_final, prepare_training
 
@@ -88,11 +89,12 @@ def refit_model(
     warn_dropped(dropped)
     params = model_params(base.best_params)
     fold_models = fixed_fold_models(config, params, training.preprocessing, keep, training)
+    plan = training.columns
     return fit_final(
         config,
         training,
         FinalModel(
-            preprocess=fit_preprocess(training.preprocessing, training.x_statistics),
+            preprocess=fit_preprocess(training.preprocessing, training.x_statistics, len(plan.numeric)),
             keep=keep,
             fold_models=fold_models,
             # No cluster is formed, so each column is permuted alone.
@@ -100,7 +102,7 @@ def refit_model(
         ),
         fixed_fold_scores(fold_models, training),
         selection=None,
-        best_params={**base.best_params, K_PARAM: len(keep)},
+        best_params={**params, **selection_params(keep, plan.categorical, len(plan.numeric))},
         hpo=None,
         base=describe_base(base, MODE, dropped),
     )

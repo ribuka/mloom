@@ -232,3 +232,15 @@ def test_refit_is_read_and_predicts_without_mloom(
 
     assert completed.returncode == 0, completed.stderr
     np.testing.assert_array_equal(np.load(paths[2]), result.pipeline.predict(frame))
+
+
+def test_categorical_columns_of_the_base_are_refitted(
+    graded: pl.DataFrame, make_base: Callable[..., tuple[Result, Base]]
+) -> None:
+    """A refit on the same data keeps the categorical columns of the base, its ``use:<column>`` and ``cat_smooth``."""
+    optimized, base = make_base(data=graded, model="lightgbm", exclude_columns=("t", "y", "c2", "c3"))
+    result = refit_model(graded, base, unavailable_sensors=None)
+    assert result.selected_columns == optimized.selected_columns
+    assert result.best_params == optimized.best_params
+    assert result.to_dict()["preprocessing"]["categorical"] == optimized.to_dict()["preprocessing"]["categorical"]
+    np.testing.assert_allclose(result.pipeline.predict(graded), optimized.pipeline.predict(graded), rtol=1e-12)
