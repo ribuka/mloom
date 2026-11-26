@@ -13,6 +13,7 @@ import pytest
 
 from mloom import Config, InputError, load_base, optimize_model, read_run
 from mloom.base import check_output
+from mloom.models import MODELS
 from mloom.settings import settings_from_record
 
 
@@ -120,6 +121,7 @@ def _without(record: dict[str, Any], key: str) -> dict[str, Any]:
         "hpo.timeout",
         "selected_columns",
         "best_params",
+        "best_params.k",
         "created_at",
         "cv_scores",
         "settings",
@@ -157,6 +159,51 @@ def test_invalid_value_raises_with_the_version(
     with pytest.raises(InputError, match=match) as error:
         load_base(path)
     assert f"mloom {version('mloom')}" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("best_params", "match"),
+    [
+        ({"k": 2}, "parameter 'alpha' is not found"),
+        ({"k": 2, "alpha": "x"}, "not a valid type"),
+        ({"k": 2, "alpha": 1e9}, "out of the range"),
+        ({"k": 2, "alpha": 1.0, "max_depth": 3}, "unknown max_depth"),
+        ({"k": 0, "alpha": 1.0}, "best_params.k must be 1 or more"),
+        ({"k": 2.0, "alpha": 1.0}, "best_params.k must be int"),
+    ],
+)
+def test_parameters_that_do_not_fit_the_model_raise(
+    base_path: Path, tmp_path: Path, best_params: dict[str, Any], match: str
+) -> None:
+    """``best_params`` must be what the search space of the model could suggest, with ``k`` of 1 or more."""
+    path = _write_record(tmp_path / "broken" / "model.pkl", {**read_run(base_path), "best_params": best_params})
+    with pytest.raises(InputError, match=match) as error:
+        load_base(path)
+    assert "best_params" in str(error.value)
+    assert f"mloom {version('mloom')}" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("model", "params", "match"),
+    [
+        ("ridge", {"alpha": 1.0}, None),
+        ("random_forest", {"n_estimators": 100, "max_depth": 4, "min_samples_leaf": 2}, "max_features"),
+        (
+            "random_forest",
+            {"n_estimators": 100.0, "max_depth": 4, "min_samples_leaf": 2, "max_features": 0.5},
+            "n_estimators must be int",
+        ),
+        ("pls", {"n_components": 20}, None),
+        ("pls", {"n_components": True}, "n_components must be int"),
+    ],
+)
+def test_check_params_follows_the_search_space(model: str, params: dict[str, Any], match: str | None) -> None:
+    """Each model accepts the parameters its search space suggests, and nothing else."""
+    if match is None:
+        MODELS[model].check_params(params)
+    else:
+        with pytest.raises(InputError, match=match):
+            MODELS[model].check_params(params)
 
 
 def test_invalid_setting_raises_with_its_key(base_path: Path, tmp_path: Path) -> None:

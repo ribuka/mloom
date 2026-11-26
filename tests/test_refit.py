@@ -141,6 +141,18 @@ def test_no_usable_column_raises(frame: pl.DataFrame, make_base: Callable[..., t
     assert all(f"{name} (not_in_data)" in str(error.value) for name in optimized.selected_columns)
 
 
+def test_no_candidate_at_all_raises_with_the_dropped_columns(
+    frame: pl.DataFrame, make_base: Callable[..., tuple[Result, Base]]
+) -> None:
+    """When the data leaves no candidate at all, the error still names each selected column and its reason."""
+    optimized, base = make_base()
+    selected = optimized.selected_columns
+    data = frame.select("y", *selected).with_columns(pl.lit(None, dtype=pl.Float64).alias(name) for name in selected)
+    with pytest.raises(InputError, match="no column the base selected is left") as error:
+        refit_model(data, base, unavailable_sensors=None)
+    assert all(f"{name} (all_null)" in str(error.value) for name in selected)
+
+
 def test_pls_components_are_limited_to_the_columns_left(
     frame: pl.DataFrame, make_base: Callable[..., tuple[Result, Base]]
 ) -> None:

@@ -16,6 +16,7 @@ from mloom.config import Config
 from mloom.data import Data
 from mloom.errors import OptimizationError
 from mloom.interpretation import FoldModels, importance_groups
+from mloom.models import K_PARAM
 from mloom.pipeline import Preprocessing, build_pipeline, fit_preprocess
 from mloom.result import Result
 from mloom.selection import (
@@ -26,8 +27,6 @@ from mloom.selection import (
 )
 from mloom.settings import load_settings
 from mloom.training import FinalModel, TrainingData, fit_final, prepare_training
-
-K_PARAM = "k"
 
 
 def optimize_model(data: Data, config: Config) -> Result:

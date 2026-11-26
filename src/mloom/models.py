@@ -4,13 +4,20 @@ Each model fixes its hyperparameter search space here, so that neither the
 user nor the Skill has to write one (see "モデル" in ``docs/spec.md``).
 """
 
+import sys
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import optuna
+from optuna.distributions import IntDistribution
+from optuna.trial import BaseTrial, FixedTrial
+
+from mloom.errors import InputError
 
 Params = dict[str, Any]
+# The parameter of the search (and of ``best_params``) that is the number of selected columns.
+K_PARAM = "k"
 
 
 @dataclass(frozen=True)
@@ -28,7 +35,7 @@ class ModelSpec:
         the features may be left unimputed (``[impute] method = "none"``).
     default_impute : str
         The imputation ``[impute] method = "auto"`` stands for.
-    suggest : Callable[[optuna.Trial, int], Params]
+    suggest : Callable[[BaseTrial, int], Params]
         Samples the hyperparameters of a trial, given the number of candidate
         columns.
     builders : dict[str, Callable[[Params, int], Any]]
@@ -40,7 +47,7 @@ class ModelSpec:
     scale: bool
     handles_missing: bool
     default_impute: str
-    suggest: Callable[[optuna.Trial, int], Params]
+    suggest: Callable[[BaseTrial, int], Params]
     builders: dict[str, Callable[[Params, int], Any]]
 
     def build(self, task: str, params: Params, seed: int) -> Any:  # noqa: ANN401 - any scikit-learn estimator
@@ -63,8 +70,46 @@ class ModelSpec:
         """
         return self.builders[task](params, seed)
 
+    def check_params(self, params: Params) -> None:
+        """Check that hyperparameters are those the search space of the model could suggest.
 
-def _suggest_ridge(trial: optuna.Trial, n_candidates: int) -> Params:  # noqa: ARG001 - signature of ModelSpec.suggest
+        Every parameter must be there, with a value of its type in its range,
+        and no other parameter may be. A bound that depends on the number of
+        candidate columns (``n_components`` of PLS) is not checked:
+        ``build_pipeline`` limits it.
+
+        Parameters
+        ----------
+        params : Params
+            Hyperparameters, without ``k``.
+
+        Raises
+        ------
+        InputError
+            When a parameter is missing, unknown, or of a wrong type or out of
+            its range.
+        """
+        trial = FixedTrial(params)
+        try:
+            with warnings.catch_warnings():
+                # FixedTrial only warns of a value out of the range of its distribution.
+                warnings.simplefilter("error")
+                self.suggest(trial, sys.maxsize)
+        except (ValueError, TypeError, UserWarning) as error:
+            raise InputError(f"parameters of model {self.name!r}: {error}") from error
+        unknown = sorted(set(params) - set(trial.distributions))
+        if unknown:
+            raise InputError(f"parameters of model {self.name!r}: unknown {', '.join(unknown)}")
+        for name, distribution in trial.distributions.items():
+            value = params[name]
+            kinds = (int,) if isinstance(distribution, IntDistribution) else (int, float)
+            if isinstance(value, bool) or not isinstance(value, kinds):
+                raise InputError(
+                    f"parameters of model {self.name!r}: {name} must be {kinds[0].__name__}; got {value!r}"
+                )
+
+
+def _suggest_ridge(trial: BaseTrial, n_candidates: int) -> Params:  # noqa: ARG001 - signature of ModelSpec.suggest
     return {"alpha": trial.suggest_float("alpha", 1e-4, 1e3, log=True)}
 
 
@@ -81,7 +126,7 @@ def _build_ridge_classifier(params: Params, seed: int) -> Any:  # noqa: ANN401 -
     return LogisticRegression(C=1.0 / params["alpha"], max_iter=1000, random_state=seed)
 
 
-def _suggest_pls(trial: optuna.Trial, n_candidates: int) -> Params:
+def _suggest_pls(trial: BaseTrial, n_candidates: int) -> Params:
     return {"n_components": trial.suggest_int("n_components", 1, min(20, n_candidates))}
 
 
@@ -92,7 +137,7 @@ def _build_pls_regressor(params: Params, seed: int) -> Any:  # noqa: ANN401, ARG
     return PLSRegression(n_components=params["n_components"], scale=False)
 
 
-def _suggest_random_forest(trial: optuna.Trial, n_candidates: int) -> Params:  # noqa: ARG001 - signature of ModelSpec.suggest
+def _suggest_random_forest(trial: BaseTrial, n_candidates: int) -> Params:  # noqa: ARG001 - signature of ModelSpec.suggest
     return {
         "n_estimators": trial.suggest_int("n_estimators", 50, 300, step=50),
         "max_depth": trial.suggest_int("max_depth", 2, 32, log=True),
@@ -113,7 +158,7 @@ def _build_random_forest_classifier(params: Params, seed: int) -> Any:  # noqa: 
     return RandomForestClassifier(**params, random_state=seed, n_jobs=1)
 
 
-def _suggest_lightgbm(trial: optuna.Trial, n_candidates: int) -> Params:  # noqa: ARG001 - signature of ModelSpec.suggest
+def _suggest_lightgbm(trial: BaseTrial, n_candidates: int) -> Params:  # noqa: ARG001 - signature of ModelSpec.suggest
     return {
         "num_leaves": trial.suggest_int("num_leaves", 8, 256, log=True),
         "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),

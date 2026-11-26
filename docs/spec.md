@@ -744,6 +744,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   - `exclude_columns` は、記録の一番上に足した `exclude_columns`（`Config.exclude_columns` そのまま）から読む（2026-11-26、Issue #16 の実装で決定）。Issue の当初案は `excluded_columns` のうち `reason` が `user_excluded` の列だったが、そこには、データに無い列と、目的変数・`time_column`・`group_column` を兼ねる列が残らない（`mloom.columns.name_reason` は目的変数と役割の列を先に判定し、`plan_columns` はデータにある列だけを見る）。ベースのデータに無かった列が新しいデータに現れると、ユーザーが外した列なのに候補列になってしまうため、指定したとおりの値を残す。
 - 設定の値: 記録の `settings` の表ごとの値を、`mloom.toml` と同じ検査で読む（`mloom.settings.settings_from_record`）。`sources` はどのキーもベースの `model.pkl` のパス、`files` は `[{"role": "base", "path": "<ベースの model.pkl のパス>", "found": true}]`。記録の `sources`・`files` と、mloom が知らないキーは読まない。
 - 必要なキー: 上の表のキーの全部（`hpo` が `null` なら `hpo.n_trials`・`hpo.timeout` は要らない）、`selected_columns`・`best_params`、refit が記録に写す `created_at`・`cv_scores`、設定のすべての表とキー。無い、型や値が違うときは `InputError`（終了コード 2）。メッセージに、足りない（または不正な）キーと、記録を作った版（`mloom_version`）を入れ、`mloom optimize` で作り直すよう案内する。
+  - `best_params` は、`k` が 1 以上の整数で、`k` 以外がそのモデルの探索空間で出しうる値であること（パラメータがそろい、知らないパラメータが無く、型と範囲が合う。`ModelSpec.check_params`。Optuna の `FixedTrial` で探索空間の `suggest` を通し、範囲外の警告もエラーにする）を確かめる。PLS の `n_components` の上限のうち候補列の数で決まる部分は確かめない（`build_pipeline` が切り詰める）。欠けたパラメータを推定器の既定値で補って、ベースと違う作り方で学習してしまわないため（2026-11-26、PR #26 のレビューで決定）。
   - 古い形式を読み替える処理は作らない（`AGENTS.md`）。版が違っても、必要なキーがそろっていて値が正しければ読む。記録の形式が変わる更新の後は、古いベースが使えず作り直しになるが、受け入れる（ユーザー判断）。
 
 refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の流れのうち、探索を除いたもの:
@@ -752,7 +753,7 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
    - 使えないセンサは、ベースの値ではなく、今のファイルを読む（ベースの後でセンサが壊れていることがあるため）。
    - 設定は、`settings` が `None` ならベースの記録の値、パスなら `optimize` と同じ順（そのファイル → mloom の既定値）で読む（同じ作り方で再現するため）。
 2. 採用する列: ベースの `selected_columns` のうち、今回の候補列にあるもの（ベースの順）。無い列は外し、理由（今回の `excluded_columns` の `reason`。データに列が無ければ `not_in_data`）を記録の `base.dropped_columns` に残し、1 列ずつ `warnings.warn` で警告する（ユーザー判断。運用を止めないため。採用する列が減ると振る舞いが変わるので、Skill が必ず伝える）。
-   - 1 列も残らなければ `InputError`（終了コード 2）。メッセージに外した列と理由を入れ、`mloom optimize` で作り直すよう案内する。
+   - 1 列も残らなければ `InputError`（終了コード 2）。メッセージに外した列と理由を入れ、`mloom optimize` で作り直すよう案内する。候補列そのものが 1 列も残らないとき（ベースが採用しなかった列も含めて）も同じメッセージにする。そのため、候補列が空かどうかの検査は `plan_columns` から `require_candidates` に分け、`prepare_training` が受け取る検査（`optimize` は `require_candidates`、refit は採用する列の検査）を列の除外の直後に呼ぶ（2026-11-26、PR #26 のレビューで決定）。
 3. パラメータ: ベースの `best_params` から `k` を除いて固定する。`pls` の `n_components` は、`build_pipeline` が採用する列の数で切り詰める（記録の `best_params.n_components` はベースの値のまま）。
 4. CV のスコア: 分割ごとに、`optimize_model` と同じ行（学習側の目的変数がある行と、学習側の目的変数が欠損した行）で前処理を fit し、固定した列とパラメータで学習側を学習して評価側を評価する（`metric.report_value`）。Optuna の study は作らない。分割の学習の失敗は、`optimize` の試行の失敗と違い、そのままエラーにする（終了コード 1）。
 5. 最終学習と記録の組み立ては `optimize_model` と同じ（`mloom.training.fit_final`）。`best_params.k` は採用する列の数。permutation importance のグループは採用した列 1 列ずつ（クラスタで代表を選ばないため）。
@@ -1087,7 +1088,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.errors` | 例外（`InputError` は終了コード 2、それ以外は 1） |
 | `mloom.config` | `Config` の定義と、データが要らない検査 |
 | `mloom.metrics` | 評価指標と、タスクごとに選べる指標 |
-| `mloom.models` | モデルのレジストリ（推定器、標準化の要否、欠損を扱えるかと `auto` の補完、探索空間） |
+| `mloom.models` | モデルのレジストリ（推定器、標準化の要否、欠損を扱えるかと `auto` の補完、探索空間と、パラメータがそれに合うかの検査（`check_params`）、特徴量選択の列の数のパラメータ名 `K_PARAM`） |
 | `mloom.data` | データの読み込み |
 | `mloom.sensors` | `unavailable-sensors.json` の読み込み |
 | `mloom.settings` | 設定ファイル（`mloom.toml`）とその既定値の読み込みと、ベースの記録の設定の値の読み込み（`settings_from_record`） |

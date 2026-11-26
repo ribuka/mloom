@@ -13,13 +13,13 @@ from typing import Any
 from sklearn.metrics import get_scorer
 
 from mloom.base import Base
-from mloom.columns import require_candidates
+from mloom.columns import ColumnPlan
 from mloom.config import DEFAULT_UNAVAILABLE_SENSORS
 from mloom.data import Data
 from mloom.errors import InputError
 from mloom.filters import Condition
 from mloom.interpretation import FoldModels, fit_fold
-from mloom.optimize import K_PARAM
+from mloom.models import K_PARAM
 from mloom.pipeline import fit_preprocess
 from mloom.result import Result
 from mloom.settings import load_settings
@@ -87,8 +87,13 @@ def refit_model(
         settings=settings,
     )
     run_settings = base.settings if settings is None else load_settings(settings)
-    training = prepare_training(data, config, run_settings, require_candidates)
-    keep, dropped = _keep(base, training)
+    # Checked as soon as the candidates are decided, so that no column left names every dropped column.
+    training = prepare_training(data, config, run_settings, lambda plan: _keep(base, plan))
+    keep, dropped = _keep(base, training.columns)
+    for column in dropped:
+        warnings.warn(
+            f"column {column['name']!r} of the base is dropped: {column['reason']}", UserWarning, stacklevel=2
+        )
     params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
     cv_plan = training.cv_plan
     fold_models = FoldModels(
@@ -125,10 +130,10 @@ def refit_model(
     )
 
 
-def _keep(base: Base, training: TrainingData) -> tuple[list[int], list[dict[str, Any]]]:
+def _keep(base: Base, plan: ColumnPlan) -> tuple[list[int], list[dict[str, Any]]]:
     # The columns of the base that are still candidates, in the order of the base, and why the others are not.
-    position = {name: i for i, name in enumerate(training.columns.candidates)}
-    reasons = {column.name: column.reason for column in training.columns.excluded}
+    position = {name: i for i, name in enumerate(plan.candidates)}
+    reasons = {column.name: column.reason for column in plan.excluded}
     keep: list[int] = []
     dropped: list[dict[str, Any]] = []
     for name in base.selected_columns:
@@ -139,12 +144,7 @@ def _keep(base: Base, training: TrainingData) -> tuple[list[int], list[dict[str,
     if not keep:
         described = ", ".join(f"{column['name']} ({column['reason']})" for column in dropped)
         raise InputError(
-            f"no column the base selected is left as a candidate: {described}; "
-            "make the model again with mloom optimize"
-        )
-    for column in dropped:
-        warnings.warn(
-            f"column {column['name']!r} of the base is dropped: {column['reason']}", UserWarning, stacklevel=3
+            f"no column the base selected is left as a candidate: {described}; make the model again with mloom optimize"
         )
     return keep, dropped
 
