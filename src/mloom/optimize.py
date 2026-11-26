@@ -34,7 +34,12 @@ from mloom.pipeline import (
 from mloom.result import DataSummary, Result
 from mloom.row_hash import check_hashable, hash_columns, hash_rows
 from mloom.rows import select_rows
-from mloom.selection import rank_columns, top_columns
+from mloom.selection import (
+    correlation_clusters,
+    describe_selection,
+    rank_columns,
+    top_columns,
+)
 from mloom.sensors import load_unavailable_sensors
 from mloom.settings import load_settings
 from mloom.training_period import last_time
@@ -82,16 +87,19 @@ def optimize_model(data: Data, config: Config) -> Result:
     rows = order_rows(training.labeled, config)
     y = _target(rows, config)
     columns = plan_columns(rows, training.unlabeled, config, sensors, settings.columns.max_missing_rate)
-    cv_plan = plan_cv(rows, y, training.unlabeled, config)
     x = to_matrix(rows, columns.candidates)
     x_unlabeled = to_matrix(training.unlabeled, columns.candidates)
+    x_statistics = np.vstack([x, x_unlabeled])
+    # The clusters do not use the target, so they come from the statistic rows of the whole period.
+    clusters = correlation_clusters(x_statistics, settings.selection.max_correlation)
+    cv_plan = plan_cv(rows, y, training.unlabeled, config)
 
-    study = _search(config, preprocessing, x, y, x_unlabeled, cv_plan)
+    study = _search(config, preprocessing, (x, y, x_unlabeled), clusters, cv_plan)
     best = study.best_trial
     params = {name: value for name, value in best.params.items() if name != K_PARAM}
-    x_statistics = np.vstack([x, x_unlabeled])
     preprocess = fit_preprocess(preprocessing, x_statistics)
-    keep = top_columns(rank_columns(config.task, preprocess, x, y, x_statistics), best.params[K_PARAM])
+    ranking = rank_columns(config.task, preprocess, x, y, x_statistics, clusters)
+    keep = top_columns(ranking, best.params[K_PARAM])
     pipeline = build_pipeline(config, params, preprocess, keep, columns.candidates)
     pipeline.fit(rows, y)
     fold_scores = best.user_attrs["fold_scores"]
@@ -116,6 +124,7 @@ def optimize_model(data: Data, config: Config) -> Result:
         clip=describe_clip(settings.clip.method, fitted_clip_bounds(preprocess), columns.candidates),
         impute={"method": preprocessing.impute},
         columns=columns,
+        selection=describe_selection(clusters, ranking, keep, columns.candidates, settings.selection.max_correlation),
         selected_columns=[columns.candidates[i] for i in keep],
         best_params=best.params,
         cv_scores={"folds": fold_scores, "mean": float(np.mean(fold_scores)), "std": float(np.std(fold_scores))},
@@ -143,20 +152,26 @@ def _target(rows: pl.DataFrame, config: Config) -> np.ndarray:
 
 
 def _search(
-    config: Config, preprocessing: Preprocessing, x: np.ndarray, y: np.ndarray, x_unlabeled: np.ndarray, cv_plan: CVPlan
+    config: Config,
+    preprocessing: Preprocessing,
+    data: tuple[np.ndarray, np.ndarray, np.ndarray],
+    clusters: list[list[int]],
+    cv_plan: CVPlan,
 ) -> optuna.Study:
-    n_candidates = x.shape[1]
+    x, y, x_unlabeled = data
+    # Only one representative of each cluster can be selected.
+    n_clusters = len(clusters)
     metric = config.metric_spec
     scorer = get_scorer(metric.scorer)
     # Each fold fits the preprocessing and ranks the columns once for every trial.
     prepared = [
-        _prepare_fold(config, preprocessing, (x[train], y[train]), x_unlabeled[unlabeled])
+        _prepare_fold(config, preprocessing, (x[train], y[train]), x_unlabeled[unlabeled], clusters)
         for (train, _), unlabeled in zip(cv_plan.folds, cv_plan.unlabeled_folds, strict=True)
     ]
 
     def objective(trial: optuna.Trial) -> float:
-        params = config.model_spec.suggest(trial, n_candidates)
-        k = trial.suggest_int(K_PARAM, 1, n_candidates, log=True)
+        params = config.model_spec.suggest(trial, n_clusters)
+        k = trial.suggest_int(K_PARAM, 1, n_clusters, log=True)
         fold_scores = []
         for (train, test), (preprocess, ranking) in zip(cv_plan.folds, prepared, strict=True):
             pipeline = build_pipeline(config, params, preprocess, top_columns(ranking, k))
@@ -174,12 +189,16 @@ def _search(
 
 
 def _prepare_fold(
-    config: Config, preprocessing: Preprocessing, train: tuple[np.ndarray, np.ndarray], x_unlabeled: np.ndarray
+    config: Config,
+    preprocessing: Preprocessing,
+    train: tuple[np.ndarray, np.ndarray],
+    x_unlabeled: np.ndarray,
+    clusters: list[list[int]],
 ) -> tuple[Pipeline, np.ndarray]:
-    # The statistics come from the training side; the ranking, from its labeled rows only.
+    # The statistics come from the training side; the representatives and their ranking, from its labeled rows only.
     x_statistics = np.vstack([train[0], x_unlabeled])
     preprocess = fit_preprocess(preprocessing, x_statistics)
-    return preprocess, rank_columns(config.task, preprocess, *train, x_statistics)
+    return preprocess, rank_columns(config.task, preprocess, *train, x_statistics, clusters)
 
 
 def _score_fold(

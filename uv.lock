@@ -212,6 +212,7 @@ dependencies = [
     { name = "optuna" },
     { name = "polars" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "shap" },
 ]
 
@@ -229,6 +230,7 @@ requires-dist = [
     { name = "optuna", specifier = ">=5.1.0" },
     { name = "polars", specifier = ">=2.2.0" },
     { name = "scikit-learn", specifier = ">=1.9.1" },
+    { name = "scipy", specifier = ">=1.18.1" },
     { name = "shap", specifier = ">=0.54.1" },
 ]
 

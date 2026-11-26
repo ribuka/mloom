@@ -149,6 +149,21 @@ class ImputeSettings:
     n_neighbors: int
 
 
+@dataclass(frozen=True)
+class SelectionSettings:
+    """``[selection]``: the feature selection (see "特徴量選択" in ``docs/spec.md``).
+
+    Parameters
+    ----------
+    max_correlation : float
+        Feature columns whose |Spearman correlation| is above this are
+        clustered, and only the representative of each cluster can be
+        selected. 1 clusters nothing.
+    """
+
+    max_correlation: float
+
+
 # Table → (its settings, key → check that returns the value).
 _TABLES: dict[str, tuple[Callable[..., Any], dict[str, Check]]] = {
     "columns": (ColumnSettings, {"max_missing_rate": _rate}),
@@ -168,6 +183,7 @@ _TABLES: dict[str, tuple[Callable[..., Any], dict[str, Check]]] = {
         ImputeSettings,
         {"method": _one_of(IMPUTE_METHODS), "fill_value": _number, "n_neighbors": _count},
     ),
+    "selection": (SelectionSettings, {"max_correlation": _rate}),
 }
 
 
@@ -204,6 +220,8 @@ class Settings:
         ``[clip]``.
     impute : ImputeSettings
         ``[impute]``.
+    selection : SelectionSettings
+        ``[selection]``.
     sources : dict[str, dict[str, str]]
         Path of the file each key was read from, by table and key.
     files : list[SettingsFile]
@@ -214,6 +232,7 @@ class Settings:
     preprocessing: PreprocessingSettings
     clip: ClipSettings
     impute: ImputeSettings
+    selection: SelectionSettings
     sources: dict[str, dict[str, str]]
     files: list[SettingsFile]
 

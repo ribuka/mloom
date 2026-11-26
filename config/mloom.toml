@@ -41,3 +41,8 @@ method = "auto"
 fill_value = 0.0
 # knn: the number of neighbors. An integer of 1 or more.
 n_neighbors = 5
+
+[selection]
+# Feature columns whose |Spearman correlation| is above this are clustered, and only the
+# representative of each cluster can be selected. 0 to 1; 1 clusters nothing.
+max_correlation = 0.9

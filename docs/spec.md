@@ -176,6 +176,11 @@ method = "auto"
 fill_value = 0.0
 # knn の近傍の数。1 以上の整数。既定 5
 n_neighbors = 5
+
+[selection]
+# スピアマンの |ρ| がこの値を超える説明変数をクラスタにまとめ、各クラスタの代表だけを採用の候補にする。
+# 0 〜 1。1 なら何もまとめない。既定 0.9
+max_correlation = 0.9
 ```
 
 - キーは「表とキーの名前の組」で区別する（2026-11-26 実装で決定）。`[clip] method` と `[impute] method` は別のキーで、ファイルごとの優先順位もキーごとに決まる。
@@ -195,14 +200,16 @@ n_neighbors = 5
 1. データを読む（Polars）。
 2. 学習に使う行を選ぶ（下の「行のフィルタ」「行の除外」）。
 3. 列を除外する（下の「列の除外」）。除外した列と理由をすべて記録する。
-4. CV の分割を決める（下の「CV」）。
-5. Optuna で、特徴量選択とモデルのハイパーパラメータを同時に探索する（下の「特徴量選択」「HPO」）。各試行の評価は CV の平均スコア。
-6. 最良の設定で、学習に使う行のすべてを使って Pipeline を学習し直す。
-7. 記録とモデルを `model.pkl` に保存する。
+4. 相関の高い候補列をクラスタにまとめる（下の「特徴量選択」）。目的変数を使わないので、CV の前に 1 回だけ行う。
+5. CV の分割を決める（下の「CV」）。
+6. Optuna で、特徴量選択とモデルのハイパーパラメータを同時に探索する（下の「特徴量選択」「HPO」）。各試行の評価は CV の平均スコア。
+7. 最良の設定で、学習に使う行のすべてを使って Pipeline を学習し直す。
+8. 記録とモデルを `model.pkl` に保存する。
 
 評価側のデータの情報が学習に漏れないように、次のように fit する。
 
-- 特徴量選択のランク付けとモデル（目的変数を使う）は、CV の分割ごとに、学習側の目的変数がある行だけで計算・fit する。ランク付けは Pipeline の外で、分割ごとに 1 回だけ行う（「特徴量選択」）。モデルは Pipeline の中で fit する。
+- 相関のクラスタ（目的変数を使わない）は、統計量に使う行の全期間で 1 回だけ計算する。欠損率と同じ扱いで、ラベルの情報は漏れない。
+- 特徴量選択の代表の選択とランク付けとモデル（目的変数を使う）は、CV の分割ごとに、学習側の目的変数がある行だけで計算・fit する。ランク付けは Pipeline の外で、分割ごとに 1 回だけ行う（「特徴量選択」）。モデルは Pipeline の中で fit する。
 - クリップの上下限と、補完・標準化（目的変数を使わない）は、CV の分割ごとに「学習側の目的変数がある行」と「学習側に当たる目的変数が欠損した行」（「CV」）で先に計算・fit して固定し（scikit-learn の `FrozenEstimator`）、Pipeline に入れる。試行ごとには fit し直さない。
 - 最終モデルのクリップ・補完・標準化は、目的変数がある行と、目的変数が欠損した行のすべてで fit する。ランク付けは、目的変数がある行のすべてで行う。
 
@@ -414,15 +421,32 @@ n_neighbors = 5
 
 ### 特徴量選択
 
-- 各列を目的変数との関係でランク付けし（回帰は `f_regression`、分類は `f_classif`）、上位 `k` 列を使う。
-- `k` は HPO で探索するハイパーパラメータの 1 つにする（1 〜 候補列数、対数スケール）。
+- 相関の高い候補列をクラスタにまとめ、各クラスタの代表 1 列だけを候補にする（下の「相関クラスタ」）。
+- 代表を目的変数との関係でランク付けし（回帰は `f_regression`、分類は `f_classif`）、上位 `k` 列を使う。
+- `k` は HPO で探索するハイパーパラメータの 1 つにする（1 〜 クラスタの数、対数スケール。1 列だけのクラスタも数える）。
 - 最終学習で選ばれた列を「採用した列」として記録の `selected_columns` に残す（候補列の順）。`best_params.k` と数が一致する。
-- ランク付けの方法（`mutual_info_regression`、モデルの重要度、相関の高い列の間引きなど）は「未決事項」。
+- ランク付けの方法（`mutual_info_regression`、モデルの重要度など）は「未決事項」。
+
+相関クラスタ（2026-11-26 ユーザー判断。未決 5。2026-11-26 に Issue #13 で実装、`mloom.selection`）:
+
+- 目的変数と強く関係する似たセンサの群（同じ配管の流量計 A/B など）があると、上位 `k` 列の枠がその群で埋まり、別の情報を持つ列が入らない。SHAP の寄与も似た列の間で割り振られ、解釈が難しくなる。そのため、相関クラスタリングで似た列をまとめ、各クラスタの代表だけを候補にする（mRMR や VIF より、どの列がどれと似ているかを記録に残せ、説明しやすいため）。
+- しきい値は `[selection] max_correlation`（既定 0.9）。スピアマンの |ρ| がこの値を**超える**（`>`）列の組だけをまとめる。1 なら何もまとめず、クラスタを入れる前と同じ選定になる。4 つのモデルすべてにかける（`pls` も例外にしない。似た列をまとめて使う PLS の利点は失うが、設定で切れる）。
+- クラスタは目的変数を使わないので、列の除外の後、CV の分割の前に 1 回だけ計算し、最終モデルも同じクラスタを使う。使う行は統計量に使う行（目的変数がある行と、`use_unlabeled_rows` が true なら目的変数が欠損した行）の全期間。使う値は、前処理の前の候補列の値（+inf・-inf・NaN は欠損）。
+- スピアマンの |ρ|（欠損があっても決定的にするため、この方法に固定する）: 各列を、その列の欠損でない値の中で順位にし（同じ値は平均の順位）、2 列とも欠損でない行で順位どうしの Pearson 相関をとって絶対値にする。2 列とも欠損でない行が 3 行未満の組と、その行でどちらかの列の順位が一定の組は 0 とみなす。欠損の多い組では厳密なスピアマンとわずかにずれるが、受け入れる。
+- クラスタの作り方: 距離を `1 - |ρ|` とした complete linkage の階層的クラスタリング（`scipy.cluster.hierarchy.linkage(..., method="complete")`）で木を作り、その中のどの 2 列も |ρ| が `max_correlation` を超える部分木のうち最も大きいものを 1 つのクラスタにする。クラスタの中のどの 2 列も |ρ| がしきい値を超える（似た列が鎖のように長くつながる single linkage の問題を避ける）。
+- 木を切る判定は、木の高さ（距離）と `1 - max_correlation` を比べる `fcluster(..., criterion="distance")` ではなく、部分木の中の |ρ| の最小値と `max_correlation` を直接比べる（2026-11-26 実装で決定。クロスレビューの指摘）。`1 - |ρ|` と `1 - max_correlation` の引き算で、異なる値が同じ浮動小数点数に丸められることがあり（例: |ρ| = 0.1 と `max_correlation = 0.09999999999999999`）、距離で比べると「|ρ| が `max_correlation` を超える」と一致しないため。`fcluster` は距離が `t` **以下**の併合を残すので、`t = 1 - max_correlation` では |ρ| がちょうど `max_correlation` の組もまとめてしまう問題もある。
+- クラスタの順と、クラスタの中の列の順は、候補列の順にする（結果を決定的にするため）。
+- 代表は、CV の分割ごとに、学習側の目的変数がある行で選ぶ。最終モデルでは学習に使う行のすべてで選ぶ。全候補列の F 統計量（下の「ランク付け」と同じ値）を計算し、クラスタごとに F が最大の列を代表にする（同じ値なら候補列の順で前の列）。代表どうしを F の降順（同じ値は候補列の順）に並べたものを順位とし、代表でない列は採用されない。目的変数と関係の強い列を代表にしつつ、評価側の情報を漏らさないため。
+- 代表でない列も候補列のまま残す（`excluded_columns` に入れない）。前処理（クリップ・補完・標準化）は候補列のすべてで行い、`knn`・`iterative` の補完では代表でない列も使われる。
+- `pls` の `n_components` の上限も、`min(20, クラスタの数)` にする（代表でない列は採用されないため）。
+- 記録の `selection` に、しきい値・クラスタの数・2 列以上のクラスタ（列、最終モデルの代表、その代表が採用されたか）を残す（「記録」）。`model.pkl` の 2 段目は変えない（代表の選択は、採用した列の番号として `select` の段に入る）。
+- 2026-11-26 に scipy 1.18.1 で確かめたこと（`tests/test_selection.py`）: 欠損の無いデータでは `scipy.stats.spearmanr` の絶対値と相対誤差 1e-12 以内で一致する。|ρ| がちょうど `max_correlation` の組はまとめられず、`max_correlation - 1e-9` と、`1 - |ρ|` に丸めると同じ距離になるすぐ下の値ではまとめられる。`a`–`b` と `b`–`c` だけが高い鎖では `a` と `c` が同じクラスタにならない。`max_correlation = 1` では、クラスタを入れる前の main と同じ `selected_columns` と `best_params` になる（`tests/test_optimize.py`）。
+- 一定かどうかの判定: 中心化した平均の順位は 0.5 の倍数なので、統計量に使う行がおよそ 10 万行までなら、順位の和と 2 乗の和は浮動小数点で誤差なく計算でき、一定の列の偏差の 2 乗和はちょうど 0 になる（2026-11-26 実装で決定）。
 
 ランク付けを Pipeline の外で行う（2026-11-26 決定。2026-11-26 に実装、`mloom.selection`）:
 
 - たたき台の実装は、Pipeline の中の `SelectKBest(f_regression / f_classif)` で選んでいた。`SelectKBest` は NaN を受け付けず、補完しないモデルの前に置くと、欠損を含むデータで fit が `ValueError: Input X contains NaN` になる（2026-11-26 scikit-learn 1.9.1 で確認。クロスレビューの指摘）。補完しない既定（「前処理」）と両立させるため、Pipeline から外した。
-- CV の分割ごとに 1 回だけ、学習側の目的変数がある行でランク付けし、試行をまたいで使い回す。最終モデルでは、学習に使う行のすべてで 1 回行う。目的変数を使うランク付けは学習側の行だけで行うので、評価側の情報は漏れない。
+- CV の分割ごとに 1 回だけ、学習側の目的変数がある行で代表を選んでランク付けし、試行をまたいで使い回す。最終モデルでは、学習に使う行のすべてで 1 回行う。目的変数を使うランク付けは学習側の行だけで行うので、評価側の情報は漏れない。
 - 使う値は、前処理（2〜5）の出力。出力に欠損が残る場合（補完しない場合）は、その出力を、統計量用の行の前処理の出力の中央値で補完した写しを使う。この写しはランク付けにだけ使い、推定器には補完していない値（欠損を含む）を渡す。
 - NaN のスコア（一定の列など）は、最も低い順位にする。同じスコアの列は、候補列の順で前の列を上にする（結果を決定的にするため）。
 - 試行の `k` に応じて、その分割の上位 `k` 列の番号（候補列の順に並べ直したもの）を、Pipeline の `select` の段の `ColumnTransformer([("keep", "passthrough", 採用した列の番号)], remainder="drop")` に渡す。
@@ -444,7 +468,7 @@ n_neighbors = 5
 | `model` | 回帰の推定器 | 分類の推定器 | 前処理 | 探索するパラメータ（案） |
 | --- | --- | --- | --- | --- |
 | `ridge` | `Ridge` | `LogisticRegression`（L2） | 補完（既定は中央値）、標準化 | `alpha`: 1e-4 〜 1e3（対数）。分類では `C = 1 / alpha` |
-| `pls` | `PLSRegression`（`scale=False`） | 未対応（指定するとエラー。未決 1） | 補完（既定は中央値）、標準化 | `n_components`: 1 〜 min(20, 候補列数)。`k` を超える分は `k` に切り詰める |
+| `pls` | `PLSRegression`（`scale=False`） | 未対応（指定するとエラー。未決 1） | 補完（既定は中央値）、標準化 | `n_components`: 1 〜 min(20, クラスタの数)（Issue #13 で候補列数から変更）。`k` を超える分は `k` に切り詰める |
 | `random_forest` | `RandomForestRegressor` | `RandomForestClassifier` | 既定は補完しない（「前処理」） | `n_estimators`: 50 〜 300、`max_depth`: 2 〜 32、`min_samples_leaf`: 1 〜 20、`max_features`: 0.1 〜 1.0 |
 | `lightgbm`（2026-11-26 に Issue #20 で実装。`hist_gradient_boosting` を置き換えた） | `LGBMRegressor` | `LGBMClassifier` | 既定は補完しない（「前処理」） | `num_leaves`: 8 〜 256（整数、対数）、`learning_rate`: 1e-3 〜 0.3（対数）、`n_estimators`: 50 〜 1000（整数、対数）、`min_child_samples`: 5 〜 100（整数、対数）、`subsample`: 0.5 〜 1.0、`colsample_bytree`: 0.5 〜 1.0、`reg_lambda`: 1e-8 〜 10（対数）（たたき台の実装の `lightgbm` と同じ範囲） |
 
@@ -660,6 +684,8 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
 
 - `preprocessing.impute` に、最終モデルが実際に使った補完の方式（`auto` を読み替えた後の値）を足した（2026-11-26、Issue #12。「前処理」）。
 
+- 一番上の `selection`（`selected_columns` の直前）と、`settings.selection` を足した（2026-11-26、Issue #13。「特徴量選択」）。`selection.n_clusters` はクラスタの数（1 列だけのクラスタも数える）。`selection.clusters` は 2 列以上のクラスタだけを候補列の順に並べ、`representative` は最終モデルでそのクラスタの代表になった列、`selected` はそれが `selected_columns` に入っているか。
+
 ```json
 {
   "mloom_version": "0.1.0",
@@ -688,11 +714,13 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
     "preprocessing": {"use_unlabeled_rows": true},
     "clip": {"method": "iqr", "lower_quantile": 0.01, "upper_quantile": 0.99, "iqr_k": 1.5, "mad_k": 3.0, "sigma_k": 3.0},
     "impute": {"method": "auto", "fill_value": 0.0, "n_neighbors": 5},
+    "selection": {"max_correlation": 0.9},
     "sources": {
       "columns": {"max_missing_rate": "config/mloom.toml"},
       "preprocessing": {"use_unlabeled_rows": "C:/.../mloom/config/mloom.toml"},
       "clip": {"method": "config/mloom.toml", "lower_quantile": "C:/.../mloom/config/mloom.toml", "...": "..."},
-      "impute": {"method": "C:/.../mloom/config/mloom.toml", "...": "..."}
+      "impute": {"method": "C:/.../mloom/config/mloom.toml", "...": "..."},
+      "selection": {"max_correlation": "C:/.../mloom/config/mloom.toml"}
     },
     "files": [
       {"role": "project", "path": "config/mloom.toml", "found": true},
@@ -710,6 +738,14 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
     {"name": "FI-950", "reason": "high_missing", "detail": "labeled 0.798, all 0.412"}
   ],
   "candidate_columns": ["..."],
+  "selection": {
+    "max_correlation": 0.9,
+    "n_clusters": 41,
+    "clusters": [
+      {"columns": ["FI-101A", "FI-101B", "FI-102"], "representative": "FI-101A", "selected": true},
+      {"columns": ["TI-201", "TI-202"], "representative": "TI-202", "selected": false}
+    ]
+  },
   "selected_columns": ["..."],
   "cv": {
     "method": "timeseries", "splitter": "TimeSeriesSplit", "n_splits": 5,
@@ -820,7 +856,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 - 予測: ユーザーが予測を頼んだときに `mloom predict` を実行する。`--output` は、ユーザーが示さなければ `<model.pkl のディレクトリ>/predictions.parquet` にする（`mloom optimize` の `--output` を `outputs/<target>-<model>-<cv>` にするのと同じく、Skill が引数を作るための既定）。
   - 混同行列の閾値・陽性の向き・陽性のクラスは、ユーザーが示したときだけ渡す。一部だけ示されたら、残りを聞く。
   - `--shap` は、ユーザーが寄与を頼んだときだけ付ける。`--keep-columns` は、ユーザーが示した列だけ。
-- 設定: 利用側の `config/mloom.toml`（`max_missing_rate`・`use_unlabeled_rows`・`[clip]`・`[impute]`）と `config/unavailable-sensors.json` を、ユーザーに頼まれない限り書き換えない。頼まれたときも、ユーザーが示したキーを、示した値にするだけ。
+- 設定: 利用側の `config/mloom.toml`（`max_missing_rate`・`use_unlabeled_rows`・`[clip]`・`[impute]`・`[selection]`）と `config/unavailable-sensors.json` を、ユーザーに頼まれない限り書き換えない。頼まれたときも、ユーザーが示したキーを、示した値にするだけ。
 
 ### 配布と実行
 
@@ -869,6 +905,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | Pipeline、前処理、CV、特徴量選択、モデル（勾配ブースティングも） | scikit-learn |
 | HPO | optuna |
 | 予測時の SHAP の寄与 | shap |
+| 特徴量選択の相関クラスタ（順位、階層的クラスタリング） | scipy（Issue #13 で直接の依存に足した） |
 | パッケージ管理 | uv |
 | lint、型チェック、テスト | ruff、ty、pytest |
 
@@ -889,7 +926,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.cv` | ユーザーが指定した CV の分割 |
 | `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選ぶ。前処理の方式の決定と fit、採用した列の選択）と、保存した Pipeline の候補列・採用した列・推定器への入力の取り出し |
 | `mloom.clip` | クリップの上下限の計算と、記録の `preprocessing.clip` |
-| `mloom.selection` | 特徴量選択のランク付け（Pipeline の外で、分割ごとに 1 回） |
+| `mloom.selection` | 特徴量選択：相関の高い列のクラスタ（CV の前に 1 回）と、その代表のランク付け（Pipeline の外で、分割ごとに 1 回）、記録の `selection` |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
 | `mloom.result` | `Result`（記録とモデルの組み立て）と保存 |
 | `mloom.model_file` | `model.pkl` の形（1 段目の記録、2 段目のモデル）の書き出しと読み込み（`read_run`）。scikit-learn と numpy を import しない |
@@ -910,7 +947,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | 2 | 分類の範囲 | 2 値と多値の両方。クラスの不均衡への対応（`class_weight` を探索するか）は後回し |
 | 3 | CV で選べる方法 | `timeseries`、`group`、`kfold` の 3 つ。時系列かつグループ（ロットごとに時刻順）の分割が要るか |
 | 4 | `timeseries` の時刻の列 | `time_column` を必須にする。行の並び順を時刻順とみなす指定も許すか |
-| 5 | 特徴量選択の方法 | `f_regression`・`f_classif` のランクの上位 `k` 列（`k` を HPO で探索）。相関の高い列の間引きを足すか |
+| 5 | 特徴量選択の方法 | **決定**（2026-11-26）: `f_regression`・`f_classif` のランクの上位 `k` 列（`k` を HPO で探索）に、相関クラスタリングで似た列をまとめ、各クラスタの代表だけを候補にする間引きを足す。→「特徴量選択」 |
 | 6 | `unavailable-sensors.json` の形式と照合 | `{"sensors": [{"name", "reason"}]}`、列名の完全一致。接頭辞やパターンでの照合が要るか |
 | 7 | 数値でない列の扱い | 除外する（エンコードしない） |
 | 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`lightgbm`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |

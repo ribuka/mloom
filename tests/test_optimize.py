@@ -18,23 +18,76 @@ from mloom.selection import rank_columns
 MODEL_TASKS = [(model, task) for model, spec in MODELS.items() for task in spec.builders]
 
 
+@pytest.fixture
+def similar() -> pl.DataFrame:
+    """Independent ``a``, ``b`` and noise columns, and ``a2`` almost equal to ``a`` (|ρ| > 0.99).
+
+    ``y`` (numeric) and ``c`` (two classes) depend on ``a`` and ``b``.
+    """
+    rng = np.random.default_rng(3)
+    n_rows = 120
+    a, b = rng.normal(size=(2, n_rows))
+    noise = rng.normal(size=(n_rows, 3))
+    y = 2.0 * a + b + rng.normal(scale=0.1, size=n_rows)
+    return pl.DataFrame(
+        {
+            "a": a,
+            "a2": a + rng.normal(scale=0.01, size=n_rows),
+            "b": b,
+            **{f"n{i}": noise[:, i] for i in range(3)},
+            "y": y,
+            "c": np.where(y > 0, "pos", "neg"),
+        }
+    )
+
+
 @pytest.mark.parametrize(("model", "task"), MODEL_TASKS)
 def test_every_model_fits_saves_and_predicts(
-    frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, model: str, task: str
+    similar: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, model: str, task: str
 ) -> None:
-    """Each model and task saves a ``model.pkl`` whose pipeline predicts from the table."""
+    """Each model and task saves a ``model.pkl`` whose pipeline predicts from the table with similar columns."""
     target = "y" if task == "regression" else "c"
-    result = optimize_model(frame, make_config(model=model, task=task, target=target))
+    result = optimize_model(similar, make_config(model=model, task=task, target=target))
     model_path = result.save(tmp_path)
 
-    predictions = load_model(model_path)["pipeline"].predict(frame)
-    assert len(predictions) == frame.height
+    predictions = load_model(model_path)["pipeline"].predict(similar)
+    assert len(predictions) == similar.height
     run = read_run(model_path)
     assert run["model"] == model
     assert run["task"] == task
     assert set(run["selected_columns"]) <= set(run["candidate_columns"])
     assert len(run["selected_columns"]) == run["best_params"]["k"]
+    assert run["best_params"].get("n_components", 1) <= run["selection"]["n_clusters"]
     assert len(run["cv_scores"]["folds"]) == 3
+
+
+def test_similar_columns_are_not_selected_together(similar: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+    """``a`` and ``a2`` form a cluster recorded with its representative; at most one of them is selected."""
+    result = optimize_model(similar, make_config(n_trials=10))
+    run = result.to_dict()
+    assert not {"a", "a2"} <= set(run["selected_columns"])
+    selection = run["selection"]
+    assert selection["max_correlation"] == 0.9
+    [cluster] = selection["clusters"]
+    assert cluster["columns"] == ["a", "a2"]
+    assert cluster["representative"] in {"a", "a2"}
+    assert cluster["selected"] == (cluster["representative"] in run["selected_columns"])
+    assert selection["n_clusters"] == len(run["candidate_columns"]) - 1
+    assert run["best_params"]["k"] <= selection["n_clusters"]
+
+
+def test_max_correlation_of_one_selects_as_before(
+    similar: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path
+) -> None:
+    """``max_correlation = 1`` clusters nothing and selects what mloom selected before the clusters existed."""
+    settings = tmp_path / "mloom.toml"
+    settings.write_text("[selection]\nmax_correlation = 1\n", encoding="utf-8")
+    run = optimize_model(similar, make_config(n_trials=10, settings=settings)).to_dict()
+    assert run["selection"]["clusters"] == []
+    assert run["selection"]["n_clusters"] == len(run["candidate_columns"])
+    # Recorded with the same data, config and seed on main before the clusters were added.
+    assert run["selected_columns"] == ["a", "a2", "b", "n2"]
+    assert run["best_params"] == {"alpha": pytest.approx(0.00013852519879556092, rel=1e-12), "k": 4}
 
 
 @pytest.mark.parametrize(
@@ -75,11 +128,12 @@ def test_parquet_path_and_dataframe_agree(
     assert from_path.best_params == from_frame.best_params
 
 
-@pytest.mark.parametrize("model", ["random_forest", "lightgbm"])
-def test_same_seed_gives_same_result(frame: pl.DataFrame, make_config: Callable[..., Config], model: str) -> None:
-    """Two runs with the same data, config and seed select the same columns and parameters."""
+@pytest.mark.parametrize("model", list(MODELS))
+def test_same_seed_gives_same_result(similar: pl.DataFrame, make_config: Callable[..., Config], model: str) -> None:
+    """Two runs with the same data, config and seed give the same clusters, columns and parameters."""
     config = make_config(model=model)
-    first, second = optimize_model(frame, config), optimize_model(frame, config)
+    first, second = optimize_model(similar, config), optimize_model(similar, config)
+    assert first.selection == second.selection
     assert first.selected_columns == second.selected_columns
     assert first.best_params == second.best_params
     assert first.cv_scores == second.cv_scores
@@ -324,7 +378,10 @@ def test_column_related_to_the_target_is_selected(make_config: Callable[..., Con
 def test_columns_are_ranked_on_the_labeled_training_rows_only(
     frame: pl.DataFrame, make_config: Callable[..., Config], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each fold ranks once, on its training rows (never its test rows); the final model ranks on all rows."""
+    """Each fold picks and ranks the representatives once, on its training rows (never its test rows).
+
+    The final model does so on all rows.
+    """
     data = pl.concat([frame, frame.head(20).with_columns(y=pl.lit(None, dtype=pl.Float64), t=pl.col("t") + 1000)])
     plans: list[CVPlan] = []
     ranked: list[np.ndarray] = []
