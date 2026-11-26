@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 
 import mloom.optimize
+import mloom.training
 from mloom import Config, InputError, optimize_model, read_run
 from mloom.cv import CVPlan, plan_cv
 from mloom.models import MODELS
@@ -394,7 +395,7 @@ def test_columns_are_ranked_on_the_labeled_training_rows_only(
         ranked.append(x)
         return rank_columns(task, preprocess, x, *args)
 
-    monkeypatch.setattr(mloom.optimize, "plan_cv", record_plan)
+    monkeypatch.setattr(mloom.training, "plan_cv", record_plan)
     monkeypatch.setattr(mloom.optimize, "rank_columns", record_ranking)
     result = optimize_model(data, make_config(n_trials=4))
 

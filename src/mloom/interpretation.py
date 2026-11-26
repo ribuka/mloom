@@ -2,8 +2,8 @@
 
 See "解釈" in ``docs/spec.md``. The permutation importance of each group of
 similar columns is measured on the test side of each CV fold, with the model
-of the best trial refitted on that fold; the coefficients of the linear models
-and the VIP of PLS come from the final model. Every value is a plain Python
+of the CV scores (the best trial of the search) refitted on that fold; the
+coefficients of the linear models and the VIP of PLS come from the final model. Every value is a plain Python
 value, and none is NaN, so that the record stays valid JSON.
 """
 
@@ -22,33 +22,30 @@ from mloom.cv import Split
 from mloom.explain import is_linear, linear_weights
 from mloom.models import Params
 from mloom.pipeline import build_pipeline, estimator_input, selected_columns
-from mloom.selection import top_columns
 
 
 @dataclass(frozen=True)
 class FoldModels:
-    """How to rebuild the model of the best trial on each CV fold.
+    """How to rebuild the model of the CV scores on each CV fold.
 
     Parameters
     ----------
     config : Config
         The config of the run.
     params : Params
-        Hyperparameters of the best trial, without ``k``.
-    k : int
-        ``k`` of the best trial.
+        Hyperparameters of the model, without ``k``.
     folds : list[Split]
         Train and test indices of the labeled rows of each fold.
-    prepared : list[tuple[Pipeline, np.ndarray]]
-        The fitted preprocessing and the ranking of each fold, as the search
-        used them.
+    prepared : list[tuple[Pipeline, list[int]]]
+        The fitted preprocessing of each fold and the positions of the
+        columns its model uses (``build_pipeline``), as the CV scores used
+        them.
     """
 
     config: Config
     params: Params
-    k: int
     folds: list[Split]
-    prepared: list[tuple[Pipeline, np.ndarray]]
+    prepared: list[tuple[Pipeline, list[int]]]
 
 
 @dataclass(frozen=True)
@@ -102,7 +99,7 @@ def permutation_importance(
     Parameters
     ----------
     models : FoldModels
-        The models of the best trial on the CV folds.
+        The models of the CV scores on the CV folds.
     data : tuple[np.ndarray, np.ndarray]
         The candidate columns of the labeled rows before the preprocessing
         (``to_matrix``), and their target.
@@ -132,8 +129,8 @@ def permutation_importance(
     rng = np.random.default_rng(config.seed)
     baselines = []
     worsening = np.zeros((len(groups), len(models.folds)))
-    for fold, ((train, test), (preprocess, ranking)) in enumerate(zip(models.folds, models.prepared, strict=True)):
-        pipeline = _fit_fold(models, preprocess, ranking, (x[train], y[train]))
+    for fold, ((train, test), (preprocess, keep)) in enumerate(zip(models.folds, models.prepared, strict=True)):
+        pipeline = _fit_fold(models, preprocess, keep, (x[train], y[train]))
         x_test, y_test = x[test], y[test]
         baseline = metric.report_value(float(scorer(pipeline, x_test, y_test)))
         baselines.append(baseline)
@@ -161,11 +158,10 @@ def permutation_importance(
 
 
 def _fit_fold(
-    models: FoldModels, preprocess: Pipeline, ranking: np.ndarray, train: tuple[np.ndarray, np.ndarray]
+    models: FoldModels, preprocess: Pipeline, keep: list[int], train: tuple[np.ndarray, np.ndarray]
 ) -> Pipeline:
-    # The same pipeline the best trial fitted on this fold; an error is not expected, so it is raised.
-    pipeline = build_pipeline(models.config, models.params, preprocess, top_columns(ranking, models.k))
-    return pipeline.fit(*train)
+    # The same pipeline the CV scores fitted on this fold; an error is not expected, so it is raised.
+    return build_pipeline(models.config, models.params, preprocess, keep).fit(*train)
 
 
 def linear_coefficients(pipeline: Pipeline, background: np.ndarray) -> dict[str, Any] | None:

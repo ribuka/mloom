@@ -1006,6 +1006,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.clip` | クリップの上下限の計算と、記録の `preprocessing.clip` |
 | `mloom.selection` | 特徴量選択：相関の高い列のクラスタ（CV の前に 1 回）と、その代表のランク付け（Pipeline の外で、分割ごとに 1 回）、記録の `selection` |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
+| `mloom.training` | `optimize_model` と refit が共有する処理：行のフィルタ・行の選択・列の除外・CV の分割までの準備（`prepare_training`）と、最終学習と `Result` の組み立て（`fit_final`）。2026-11-26、Issue #16 で `mloom.optimize` から切り出した |
 | `mloom.result` | `Result`（記録とモデルの組み立て）と保存 |
 | `mloom.model_file` | `model.pkl` の形（1 段目の記録、2 段目のモデル）の書き出しと読み込み（`read_run`）。scikit-learn と numpy を import しない |
 | `mloom.dtypes` | 列の型を、フィルタと行のハッシュが比べる値の種類（数値、真偽値、文字列、日時、日付）として読む |
