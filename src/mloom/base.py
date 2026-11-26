@@ -38,9 +38,10 @@ class Base:
     record : dict[str, Any]
         The record of the run read from it.
     config : Config
-        The config of the run, from the record. ``unavailable_sensors`` and
-        ``settings`` are the defaults of ``Config``: the record does not hold
-        them, and ``refit_model`` takes them as its own arguments.
+        The config of the run, from the record. Its ``settings`` are
+        ``settings``, so that ``dataclasses.replace(base.config, ...)``
+        keeps them; ``unavailable_sensors`` is the default of ``Config``, as
+        the record does not hold the file (a sensor may have broken since).
     settings : Settings
         The settings recorded (``mloom.settings.settings_from_record``).
     selected_columns : list[str]
@@ -100,6 +101,7 @@ def _base(path: str | Path, record: dict[str, Any]) -> Base:
             "timeout": _value(record, "hpo.timeout", (int, float, _NONE)),
         }
     )
+    settings = settings_from_record(_value(record, "settings", (dict,)), str(path))
     config = Config(
         target=_value(record, "target", (str,)),
         task=_value(record, "task", (str,)),
@@ -113,6 +115,7 @@ def _base(path: str | Path, record: dict[str, Any]) -> Base:
         filters=tuple(_value(record, "filters", (list,))),
         train_filters=tuple(_value(record, "train_filters", (list,))),
         seed=_value(record, "seed", (int,)),
+        settings=settings,
         **search,
     )
     best_params = _value(record, "best_params", (dict,))
@@ -130,7 +133,7 @@ def _base(path: str | Path, record: dict[str, Any]) -> Base:
         path=path,
         record=record,
         config=config,
-        settings=settings_from_record(_value(record, "settings", (dict,)), str(path)),
+        settings=settings,
         selected_columns=_names(record, "selected_columns"),
         best_params=best_params,
     )

@@ -80,11 +80,10 @@ def refit_model(
         filters=base.config.filters if filters is None else filters,
         train_filters=base.config.train_filters if train_filters is None else train_filters,
         unavailable_sensors=unavailable_sensors,
-        settings=settings,
+        settings=base.config.settings if settings is None else settings,
     )
-    run_settings = base.settings if settings is None else load_settings(settings)
     # Checked as soon as the candidates are decided, so that no column left names every dropped column.
-    training = prepare_training(data, config, run_settings, lambda plan: _keep(base, plan))
+    training = prepare_training(data, config, load_settings(config.settings), lambda plan: _keep(base, plan))
     keep, dropped = _keep(base, training.columns)
     warn_dropped(dropped)
     params = {name: value for name, value in base.best_params.items() if name != K_PARAM}

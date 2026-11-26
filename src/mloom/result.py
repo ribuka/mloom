@@ -127,10 +127,12 @@ class Result:
         Mean of the input of the estimator on the rows the pipeline was
         fitted on (``mloom.explain.shap_background``).
     base : dict[str, Any] | None
-        The base of a refit (``mloom.refit.refit_model``): its ``path``,
-        the ``mode``, its ``created_at``, ``mloom_version`` and
-        ``cv_scores``, and the ``dropped_columns``; ``None`` for
-        ``optimize_model``.
+        The base of a refit (``mloom.refit.refit_model``) or of
+        ``optimize_model``: its ``path``, the ``mode``, its ``created_at``,
+        ``mloom_version`` and ``cv_scores``, and the ``dropped_columns``
+        (``mloom.base.describe_base``); ``optimize_model`` adds
+        ``enqueued``, ``cv_scores_on_this_data``, ``comparison`` and
+        ``not_compared``. ``None`` without a base.
     """
 
     pipeline: Pipeline
@@ -239,8 +241,8 @@ class Result:
         Raises
         ------
         InputError
-            When the result is a refit and ``model.pkl`` of ``output_dir``
-            is its base (``mloom.base.check_output``); nothing is written.
+            When the result has a base and ``model.pkl`` of ``output_dir``
+            is the base (``mloom.base.check_output``); nothing is written.
         """
         if self.base is not None:
             check_output(output_dir, self.base["path"])
