@@ -42,7 +42,7 @@ mloom は PC に 1 つ clone し、Skill はジャンクションで各エージ
 
 ```powershell
 uv run --project "<clone>" "<clone>\examples\make_sample_data.py"
-uv run --project "<clone>" mloom optimize data/sample.parquet --target quality --task regression --model hist_gradient_boosting --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors "<clone>\examples\unavailable-sensors.json" --n-trials 20 --output outputs/quality-hgb
+uv run --project "<clone>" mloom optimize data/sample.parquet --target quality --task regression --model lightgbm --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors "<clone>\examples\unavailable-sensors.json" --n-trials 20 --output outputs/quality-lgbm
 ```
 
 mloom の clone の中で試すだけなら、`--project` は要りません。
@@ -50,14 +50,14 @@ mloom の clone の中で試すだけなら、`--project` は要りません。
 ```powershell
 uv sync
 uv run examples/make_sample_data.py
-uv run mloom optimize data/sample.parquet --target quality --task regression --model hist_gradient_boosting --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors examples/unavailable-sensors.json --n-trials 20 --output outputs/quality-hgb
+uv run mloom optimize data/sample.parquet --target quality --task regression --model lightgbm --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors examples/unavailable-sensors.json --n-trials 20 --output outputs/quality-lgbm
 ```
 
-- `outputs/quality-hgb/` に `model.pkl` ができます。標準出力の最後の行はそのパスです。
+- `outputs/quality-lgbm/` に `model.pkl` ができます。標準出力の最後の行はそのパスです。
 - 実行の記録（採用した列、除外した列と理由、最良のパラメータ、CV のスコア、ライブラリの版など）は `model.pkl` の中にあり、`mloom show` で JSON に出せます。リダイレクトすれば JSON のファイルにもできます。
 
 ```powershell
-uv run mloom show outputs/quality-hgb/model.pkl
+uv run mloom show outputs/quality-lgbm/model.pkl
 ```
 
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
@@ -81,7 +81,7 @@ uv run mloom show outputs/quality-hgb/model.pkl
 | データ | 位置引数 | Parquet ファイル（API では polars の DataFrame も可） |
 | 目的変数 | `--target` | 列名（1 個） |
 | 回帰か分類か | `--task` | `regression`、`classification` |
-| モデル | `--model` | `ridge`、`pls`（回帰のみ）、`random_forest`、`hist_gradient_boosting` |
+| モデル | `--model` | `ridge`、`pls`（回帰のみ）、`random_forest`、`lightgbm` |
 | CV の方法 | `--cv` | `timeseries`（`--time-column` が必要）、`group`（`--group-column` が必要）、`kfold` |
 
 その他の引数は `uv run mloom optimize --help` を見てください。
@@ -93,7 +93,7 @@ uv run mloom show outputs/quality-hgb/model.pkl
 | 表 | `method` | 選べるもの |
 | --- | --- | --- |
 | `[clip]` | 既定 `none`（切らない） | `quantile`、`iqr`、`mad`、`sigma`。上下限は欠損と無限大を除いて計算し、ばらつきが 0 の列は切りません |
-| `[impute]` | 既定 `auto` | `none`、`median`、`mean`、`most_frequent`、`constant`、`knn`、`iterative`。`auto` は `ridge`・`pls` では `median`、`hist_gradient_boosting`・`random_forest` では `none`（欠損のまま学習）です。`none` を `ridge`・`pls` で選ぶと終了コード 2 で止まります |
+| `[impute]` | 既定 `auto` | `none`、`median`、`mean`、`most_frequent`、`constant`、`knn`、`iterative`。`auto` は `ridge`・`pls` では `median`、`lightgbm`・`random_forest` では `none`（欠損のまま学習）です。`none` を `ridge`・`pls` で選ぶと終了コード 2 で止まります |
 
 - 使った値は記録の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。
 
@@ -184,7 +184,7 @@ predictions = mloom.predict(
 - 回帰の混同行列は、`--cm-actual-threshold`・`--cm-predicted-threshold`・`--cm-positive`（`above` か `below`）を 3 つそろえて与えます。`above` は閾値より大きい値、`below` は閾値より小さい値を陽性とし、閾値ちょうどの値は陰性です。実測は実測の閾値で、予測は予測の閾値で判定します。
 - 分類の混同行列は、`--positive-class` で陽性のクラスを与えます。予測は、そのクラスの確率が `--cm-predicted-threshold`（既定 0.5）より大きいときに陽性です。多値分類では「そのクラスか、それ以外か」で判定します。
 - 引数がモデルに合わないとき（回帰で閾値を一部だけ与えた、回帰で `--positive-class` を与えた、学習時に無いクラスを与えた、など）は、終了コード 2 で止まります。
-- SHAP の寄与は、推定器への入力（前処理と、採用した列の選択の後の値）に対する値です。基準値と寄与の合計は、回帰では予測値、分類では `hist_gradient_boosting` と `ridge`（ロジスティック回帰）は対数オッズ、`random_forest` は確率です。2 値分類は `classes_[1]` に対する値です。`random_forest` の寄与の計算は遅いことがあります（1000 行で約 1 分）。
+- SHAP の寄与は、推定器への入力（前処理と、採用した列の選択の後の値）に対する値です。基準値と寄与の合計は、回帰では予測値、分類では `lightgbm`（`predict(x, raw_score=True)`）と `ridge`（ロジスティック回帰）は対数オッズ、`random_forest` は確率です。2 値分類は `classes_[1]` に対する値です。`random_forest` の寄与の計算は遅いことがあります（1000 行で約 1 分）。
 
 ### mloom を使わずに予測する
 
@@ -193,13 +193,13 @@ predictions = mloom.predict(
 ```python
 import pickle
 
-with open("outputs/quality-hgb/model.pkl", "rb") as file:
+with open("outputs/quality-lgbm/model.pkl", "rb") as file:
     run = pickle.load(file)     # 記録（scikit-learn が無くても読める）
     bundle = pickle.load(file)  # モデル（学習時と同じ版の scikit-learn などが要る）
 ```
 
 - 1 つ目は実行の記録（`mloom show` の出力と同じ辞書）で、Python の基本の型だけでできているので、scikit-learn も numpy も無くても読めます。
-- 2 つ目はモデルで、`pipeline`、`filters`、`train_filters`、`training_rows`、`shap_background` の辞書です。読むには、学習時と同じ版の scikit-learn・numpy・scipy が要ります（版は記録の `versions` にあります）。
+- 2 つ目はモデルで、`pipeline`、`filters`、`train_filters`、`training_rows`、`shap_background` の辞書です。読むには、学習時と同じ版の scikit-learn・numpy・scipy と、`lightgbm` のモデルなら同じ版の lightgbm が要ります（版は記録の `versions` にあります）。
 
 予測の例:
 

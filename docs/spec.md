@@ -5,10 +5,11 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 - 本書はたたき台（2026-11-26 作成）。出典は会話記録「モデル最適化 Skill 化案」の抜粋と、その会話の最初のユーザーの入力。
 - 「決定」は会話で合意した事項、「案」は本書で提案する未確定の事項。案は「未決事項」で確認してから決定に移す。
 - 案のまま、試しに動かせるたたき台を実装した（2026-11-26、v0.1.0）。実装で値を決めた箇所は、その旨を書いている。
-- たたき台の実装の後に、未決 8・10・12・13・16・18 を決め、行のフィルタ、クリップ、補完の方式の選択、`hist_gradient_boosting` を足すことを決めた（2026-11-26 ユーザー判断）。まだ実装していない箇所には「（未実装）」と書き、実装は後続の PR で行う。
+- たたき台の実装の後に、未決 8・10・12・13・16・18 を決め、行のフィルタ、クリップ、補完の方式の選択、`hist_gradient_boosting` を足すことを決めた（2026-11-26 ユーザー判断。`hist_gradient_boosting` は、その後 Issue #20 で `lightgbm` に戻した）。まだ実装していない箇所には「（未実装）」と書き、実装は後続の PR で行う。
 - そのうち、行のフィルタ、mloom に依存しない `model.pkl`、`mloom predict` の基本（スコア・混同行列・SHAP を除く）を実装した（2026-11-26、Issue #4）。
 - `mloom predict` のスコア・混同行列・SHAP の寄与を実装した（2026-11-26、Issue #6）。
 - 出力を `model.pkl` 1 つにまとめ、1 段目に実行の記録を入れた。以前は記録を別の `run.json` に保存していた（2026-11-26、Issue #18）。
+- 勾配ブースティングを `hist_gradient_boosting` から LightGBM（`lightgbm`）に戻した（2026-11-26、Issue #20。「勾配ブースティング」）。
 
 ## 要件
 
@@ -26,8 +27,8 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | 使えないセンサ | 利用側リポジトリの `config/unavailable-sensors.json` にセンサが定義されていれば、そのセンサを使わない。特徴量選択の前に除外する | 故障や廃止などで使えないセンサを、モデルに入れないため |
 | リポジトリ | 既存の `agent-skills` とは別のリポジトリ（本リポジトリ）にする | 決定論的な Python コードとその依存を持つため、汎用 Skill 集とは分ける |
 | ライブラリ | Optuna ＋ scikit-learn | ユーザーがモデルを指定する前提なので、特徴量選択・CV・HPO を mloom 側でつなぐ。AutoML ライブラリにモデル選択まで任せる必要はない |
-| モデル | 実行ごとにユーザーが選ぶ（例: `ridge`、`pls`、`hist_gradient_boosting`、`random_forest`）。1 つのモデルに固定しない | 対象データごとに適したモデルが違うため |
-| 勾配ブースティング | LightGBM をやめ、scikit-learn の `HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`（`hist_gradient_boosting`）に置き換える（2026-11-26 ユーザー判断。2026-11-26 に実装） | `model.pkl` を読む環境に lightgbm を要らなくするため。同じヒストグラム型の勾配ブースティングで、欠損をそのまま扱える。結果は LightGBM と一致しない（サンプルデータの時系列 5 分割で、既定値の RMSE は LightGBM 3.450、HistGradientBoosting 3.487）。行のサブサンプリング（LightGBM の `subsample`）は無い |
+| モデル | 実行ごとにユーザーが選ぶ（例: `ridge`、`pls`、`lightgbm`、`random_forest`）。1 つのモデルに固定しない | 対象データごとに適したモデルが違うため |
+| 勾配ブースティング | LightGBM の `LGBMRegressor`・`LGBMClassifier`（`lightgbm`）を使う。lightgbm は mloom の通常の依存にする（2026-11-26 ユーザー判断。2026-11-26 に Issue #20 で実装）。経緯: たたき台の実装の `lightgbm`（追加の依存）を、`model.pkl` を読む環境に lightgbm を要らなくするため、2026-11-26 に scikit-learn の `HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`（`hist_gradient_boosting`）に置き換えたが、同じ日に LightGBM に戻した | 文字列の列をカテゴリの説明変数として使う検討（#21）で、HGB ではカテゴリの列を実用的に扱えないとわかったため（2026-11-26、scikit-learn 1.9.1・shap 0.54.1・lightgbm 4.7.0 で `tmp/` の試作で確認）。`categorical_features` を指定した HGB では `shap.TreeExplainer` の値が誤り、2000 行（数値 1 列とカテゴリ 1 列）で基準値と寄与の合計が予測値と最大 10.5 ずれた（shap は HGB の木のカテゴリの分割（bitset）を読まず、すべて数値のしきい値として読む。同じ報告の shap/shap#3436 は、返答のないまま 2026-03-14 に not planned で閉じられた）。HGB ではカテゴリの種類も 255 までに限られる。LightGBM では、同じデータで `pred_contrib=True` と `TreeExplainer` の寄与の合計が予測値と 2.3e-14 以内で一致し、300・1000 種類のカテゴリでも学習できた。代わりに `model.pkl` を読む環境に lightgbm が要るが、これは受け入れる。追加の依存にしないのは、入れていない環境で勾配ブースティングが使えなくなるため |
 | 出力 | 学習済みの Pipeline 全体と行のフィルタの定義（モデル）と、実行の記録を、1 つの `model.pkl` に保存する。記録は pickle の 1 段目に Python の基本の型だけで、モデルは 2 段目に入れる（2026-11-26 ユーザー判断。Issue #18。以前は記録を別の `run.json` に保存していた） | モデル本体だけを保存すると、予測する側で列の選択や欠損補完を再現する必要がある。Pipeline ごと保存すれば同じ処理を通せる。1 つのファイルにまとめたのは、`model.pkl` と `run.json` には相手を指す情報が無く、片方だけのコピーや名前の変更、別の `model.pkl` での上書き、保存の途中の失敗で、どれが組なのか分からなくなるため。記録を 1 段目に基本の型だけで置くと、scikit-learn の版が変わっても記録は必ず読める。記録をテキストのまま Git で差分を見る使い方はできなくなり、本番に置く `model.pkl` に学習時の記録（ローカルのパスなど）も入るが、どちらもユーザーが受け入れた。zip にまとめる案は採らなかった |
 | `model.pkl` の依存 | `model.pkl` は mloom が無い環境でも読めるようにする。Pipeline には scikit-learn・numpy などの部品と関数だけを入れ、mloom のクラスや関数を入れない（2026-11-26 ユーザー判断。未決 16） | 予測する環境に mloom を入れなくて済むようにするため |
 | 予測の入口 | `pickle.load` に加えて、`mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 ユーザー判断。未決 10。スコア・混同行列・SHAP は 2026-11-26 に Issue #6 で実装） | フィルタの適用と、フィルタの外の行を NaN にする処理を 1 か所にまとめ、Skill から予測まで実行できるようにするため |
@@ -397,10 +398,10 @@ n_neighbors = 5
 | `model` | `auto` の補完 | 理由 |
 | --- | --- | --- |
 | `ridge`、`pls` | `median` | 欠損を扱えない |
-| `hist_gradient_boosting`、`random_forest` | `none` | 分割のたびに欠損の行を送る側を学習するので、欠損であること自体を情報として使える。中央値で埋めると、欠損の行が「たまたま中央値だった行」と区別できなくなる |
+| `lightgbm`、`random_forest` | `none` | 分割のたびに欠損の行を送る側を学習するので、欠損であること自体を情報として使える。中央値で埋めると、欠損の行が「たまたま中央値だった行」と区別できなくなる |
 
 - `RandomForestRegressor`・`RandomForestClassifier` は、欠損を含む X で fit・predict できる（2026-11-26 scikit-learn 1.9.1 で確認。2000 行・8 列、20% を NaN にしたデータで、例外なく予測値が返った）。そのため `random_forest` の `auto` は `none` のまま。
-- 学習時に欠損が無かった列に、予測時だけ欠損が来たとき、`HistGradientBoosting` は、その分割で学習の行が多かったほうの子に送る（2026-11-26 scikit-learn 1.9.1 で確認。欠損の無いデータで 1 回だけ分割する木を作ると、根の `missing_go_to_left` が 0 で、右の子の行数 1050 が左の 950 より多く、その列を NaN にした行の予測が右の子の値と一致した）。mloom の処理は変えない。
+- 学習時に欠損が無かった列に、予測時だけ欠損が来たとき、LightGBM は欠損を 0 とみなして分割する（2026-11-26 lightgbm 4.7.0 で確認。欠損の無いデータで 1 回だけ分割する木を作ると、その分割の `missing_type` が `None` で、その列を NaN にした行と 0 にした行の予測が一致した）。mloom の処理は変えない。
 - `IterativeImputer` は、作るときは `sklearn.experimental.enable_iterative_imputer` の import が要るが、pickle を読む側では要らない（2026-11-26 scikit-learn 1.9.1 で確認）。
 
 ### 特徴量選択
@@ -437,17 +438,15 @@ n_neighbors = 5
 | `ridge` | `Ridge` | `LogisticRegression`（L2） | 補完（既定は中央値）、標準化 | `alpha`: 1e-4 〜 1e3（対数）。分類では `C = 1 / alpha` |
 | `pls` | `PLSRegression`（`scale=False`） | 未対応（指定するとエラー。未決 1） | 補完（既定は中央値）、標準化 | `n_components`: 1 〜 min(20, 候補列数)。`k` を超える分は `k` に切り詰める |
 | `random_forest` | `RandomForestRegressor` | `RandomForestClassifier` | 既定は補完しない（「前処理」） | `n_estimators`: 50 〜 300、`max_depth`: 2 〜 32、`min_samples_leaf`: 1 〜 20、`max_features`: 0.1 〜 1.0 |
-| `hist_gradient_boosting`（2026-11-26 に実装。`lightgbm` を置き換えた） | `HistGradientBoostingRegressor` | `HistGradientBoostingClassifier` | 既定は補完しない（「前処理」） | `learning_rate`: 1e-3 〜 0.3（対数）、`max_iter`: 50 〜 1000（整数、対数）、`max_leaf_nodes`: 8 〜 256（整数、対数）、`min_samples_leaf`: 5 〜 100（整数、対数）、`l2_regularization`: 1e-8 〜 10（対数）、`max_features`: 0.5 〜 1.0（`lightgbm` の範囲を対応する引数に移した。行のサブサンプリングは無い） |
+| `lightgbm`（2026-11-26 に Issue #20 で実装。`hist_gradient_boosting` を置き換えた） | `LGBMRegressor` | `LGBMClassifier` | 既定は補完しない（「前処理」） | `num_leaves`: 8 〜 256（整数、対数）、`learning_rate`: 1e-3 〜 0.3（対数）、`n_estimators`: 50 〜 1000（整数、対数）、`min_child_samples`: 5 〜 100（整数、対数）、`subsample`: 0.5 〜 1.0、`colsample_bytree`: 0.5 〜 1.0、`reg_lambda`: 1e-8 〜 10（対数）（たたき台の実装の `lightgbm` と同じ範囲） |
 
 - 探索範囲の正は `mloom.models`。上の表は 2026-11-26 のたたき台の実装の値。
 - 再現性のため、モデルの `n_jobs` は 1 に固定し、`random_state` に `seed` を渡す。
-  - `HistGradientBoosting` には `n_jobs` が無く、OpenMP で全コアを使う。スレッド数は結果を変えないので、固定しない（2026-11-26 scikit-learn 1.9.1 で確認。同じ seed で `threadpoolctl.threadpool_limits` を 1 と 4 にして、2000 行・8 列・20% 欠損のデータで回帰・分類の予測値（分類は確率）が完全に一致した。20000 行・30 列で 1・4・12 スレッドでも一致した）。
-  - `hist_gradient_boosting` は `early_stopping=False`、`random_state=seed` に固定する。
+  - `lightgbm` は `n_jobs=1`、`random_state=seed`、`subsample_freq=1`、`verbose=-1` に固定する（2026-11-26 ユーザー判断。Issue #20）。`n_jobs=1` は上の再現性の決まりのため（HPO が遅くなることは受け入れる）。`subsample_freq=1` は `subsample` を効かせるため（LightGBM の既定の 0 では、行のサブサンプリングをしない）。`verbose=-1` は、学習のたびのログを出さないため。
 
 - Pipeline の構成: 入力列の選択 → 前処理（無限大を NaN に → クリップ → 補完 →（標準化）。fit 済みで固定）→ 採用した列の選択 → 推定器。前処理の fit に使う行は「処理の流れ」、各段は「前処理」「特徴量選択」。
 - 分類の `ridge` に `RidgeClassifier` ではなく `LogisticRegression` を当てるのは、`log_loss` と `roc_auc` に要る確率（`predict_proba`）を出せるため（案）。
-- たたき台の実装にあった `lightgbm`（追加の依存 `mloom[lightgbm]`）は、`hist_gradient_boosting` に置き換えてなくした（2026-11-26 に実装）。`pyproject.toml` の追加の依存と dev の依存、記録の `versions.lightgbm` も消した。
-- `hist_gradient_boosting` の `early_stopping` は `False` に固定する（2026-11-26 ユーザー判断。2026-11-26 に実装）。既定の `"auto"` は、1 万行を超えると学習データの 10% を内部の検証に取ってしまい、CV と最終学習で使う行が変わるため。
+- たたき台の実装にあった `lightgbm`（追加の依存 `mloom[lightgbm]`）は、いったん `hist_gradient_boosting` に置き換えたが、Issue #20 で `lightgbm` に戻した（2026-11-26 に実装。「勾配ブースティング」）。lightgbm は `pyproject.toml` の通常の依存で、記録の `versions.lightgbm` に版を残す。`hist_gradient_boosting` を指定すると、ほかの知らないモデル名と同じく学習の前に止まる（終了コード 2）。古い名前を読み替える処理は作らない（`AGENTS.md`）。
 - `task` に対応しないモデルを指定したら、学習を始める前にエラーで止める（終了コード 2）。
 
 ## 出力
@@ -475,7 +474,7 @@ n_neighbors = 5
   ```python
   import pickle
 
-  with open("outputs/quality-hgb/model.pkl", "rb") as file:
+  with open("outputs/quality-lgbm/model.pkl", "rb") as file:
       run = pickle.load(file)     # 記録（scikit-learn が無くても読める）
       bundle = pickle.load(file)  # モデル（学習時と同じ版の scikit-learn などが要る）
   ```
@@ -492,9 +491,9 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
   - polars と pandas の表のどちらでも予測できる。
   - 列の順を入れ替えても、余分な列があっても、同じ予測になる（`tests/test_optimize.py`）。
   - 候補列が無い表では、`ValueError: columns are missing` になる。
-  - null がある整数の列と bool の列は、float64 の NaN になって欠損として扱われる（補完するモデルでも、補完しないモデルでも予測できることを、2026-11-26 に `ridge` と `hist_gradient_boosting` で確かめた）。
+  - null がある整数の列と bool の列は、float64 の NaN になって欠損として扱われる（補完するモデルでも、補完しないモデルでも予測できることを、2026-11-26 に `ridge` と `hist_gradient_boosting` で確かめ、Issue #20 で `ridge` と `lightgbm` で確かめた）。
   - 2 段目（モデル）の pickle に `mloom` という文字列が含まれず、`sys.modules["mloom"] = None` で mloom の import を塞いだ Python でも読んで予測できる（`tests/test_predict.py`）。
-- 予測する環境には、学習時と同じ版の scikit-learn・numpy・scipy と、入力に使う polars か pandas が要る。版は記録の `versions` を見て揃える。
+- 予測する環境には、学習時と同じ版の scikit-learn・numpy・scipy と、入力に使う polars か pandas が要る。`lightgbm` のモデルなら、同じ版の lightgbm も要る（2 段目の pickle に `lightgbm` は含まれ、`mloom` は含まれない。Issue #20 のテストで確認）。版は記録の `versions` を見て揃える。
 - モデル（2 段目）は Pipeline ではなく、次の辞書にする。行のフィルタは scikit-learn の Pipeline に入れられないため（部品は行の数を変えられない。学習時は目的変数とずれ、予測時は入力の行と予測が対応しなくなる）。辞書と Pipeline には、mloom のクラス・関数・lambda を入れない。
 
 ```python
@@ -589,19 +588,21 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
 
 - `--shap` を付けたときだけ出す。計算に時間がかかることがあり、列も説明変数の数だけ増えるため。
 - shap パッケージを、mloom の通常の依存にする。使うのは `mloom predict` の側だけで、`model.pkl` の依存は増えない。
-- `hist_gradient_boosting`・`random_forest` は `shap.TreeExplainer`、`ridge`・`pls` は線形の SHAP（特徴量の独立を仮定）で計算する。どのモデルかは、推定器のクラスで決める（`HistGradientBoosting*`・`RandomForest*` なら木、ほかは線形）。
+- `lightgbm`・`random_forest` は `shap.TreeExplainer`、`ridge`・`pls` は線形の SHAP（特徴量の独立を仮定）で計算する。どのモデルかは、推定器のクラスで決める（`LGBMRegressor`・`LGBMClassifier`・`RandomForest*` なら木、ほかは線形）。
 - 寄与は、推定器への入力（前処理と、採用した列の選択の後の値）に対して計算し、採用した列の名前で出す。標準化するモデルでは、標準化した値の単位の寄与になる（合計は同じ）。
 - 線形の SHAP（2026-11-26 実装で決定）: 列 j の寄与は w_j ×（x_j − 基準_j）、基準値は基準の点での出力。基準は `model.pkl` の `shap_background`。重み w は、基準の点と、基準から列ごとに 1 だけ動かした点での、出力の差で求める。出力は入力の 1 次式なので、差は係数と一致する。推定器の係数の持ち方（`PLSRegression` は内部で入力を中心化し、`intercept_` は中心化した後の切片）に依らないため。出力は、回帰は `predict`、分類（`LogisticRegression`）は `decision_function`。
 - shap は `import` を `--shap` のときの計算の中だけで行う（2026-11-26 実装。`--shap` なしでは import しないことをテストで確認）。
 - 2 値分類は `classes_[1]` に対する値だけを出す（列が 2 倍に増えるのを防ぐため。もう一方のクラスは符号が逆になるだけ）。
 - 2026-11-26 に shap 0.54.1・scikit-learn 1.9.1・numpy 2.5.5 で確かめたこと（欠損が 10% のデータ）:
-  - `TreeExplainer` は、`HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`・`RandomForestRegressor` で動いた。
+  - `TreeExplainer` は、`HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`・`RandomForestRegressor` で動いた（`HistGradientBoosting` は Issue #20 でなくした）。
   - 基準値と寄与の合計は、予測値（分類は `decision_function` の対数オッズ）と、1e-13 程度の誤差で一致した。
-  - 1000 行にかかった時間は、`HistGradientBoosting` が約 1.5 秒、`RandomForest`（木 100 本、深さの制限なし）が約 52 秒。`random_forest` が遅いことは受け入れる。`--shap` を付けたときだけ計算するので、既定の予測は遅くならない。
-- 2026-11-26 に shap 0.54.1・scikit-learn 1.9.1 で確かめた `TreeExplainer.shap_values` の形（行 × 列 × クラス）: `HistGradientBoostingRegressor`・`RandomForestRegressor` と 2 値の `HistGradientBoostingClassifier` は（行, 列）で `expected_value` は 1 つ。多値の `HistGradientBoostingClassifier` は（行, 列, クラス）。`RandomForestClassifier` は 2 値でも（行, 列, クラス）なので、2 値では `classes_[1]` の側を取る。
+  - 1000 行にかかった時間は、`HistGradientBoosting` が約 1.5 秒、`RandomForest`（木 100 本、深さの制限なし）が約 52 秒。`LGBMRegressor`（木 300 本、`num_leaves=64`、8 列）は約 0.8 秒（2026-11-26 lightgbm 4.7.0 で確認）。`random_forest` が遅いことは受け入れる。`--shap` を付けたときだけ計算するので、既定の予測は遅くならない。
+- 2026-11-26 に shap 0.54.1・scikit-learn 1.9.1・lightgbm 4.7.0 で確かめた `TreeExplainer.shap_values` の形（行 × 列 × クラス。欠損 10% のデータ）: `LGBMRegressor`・`RandomForestRegressor` と 2 値の `LGBMClassifier` は（行, 列）で `expected_value` は 1 つ。多値の `LGBMClassifier` は（行, 列, クラス）で `expected_value` はクラスの数。`RandomForestClassifier` は 2 値でも（行, 列, クラス）なので、2 値では `classes_[1]` の側を取る。
+  - `LGBMClassifier` には `decision_function` が無い。基準値と寄与の合計は `predict(x, raw_score=True)`（対数オッズ）と一致する（回帰は `predict`。どれも 2e-14 以内）。
+  - 2 値の `LGBMClassifier` では、shap が「出力が ndarray のリストに変わった」という `UserWarning` を出すが、返る値は（行, 列）の 1 つの配列なので、`mloom.explain` はこの警告だけを抑える（2026-11-26 shap 0.54.1 で確認。Issue #20 の実装で決定）。
 - 2026-11-26 に、4 つのモデルとタスク（回帰、2 値分類、3 値分類。`pls` は回帰だけ）の 10 の組み合わせで、行ごとの基準値と寄与の合計が、そのモデルの出力と 1e-6 以内で一致することをテストで確かめた（`tests/test_predict.py`）。
 - 列は、採用した列ごとの `shap_<列名>` と、基準値の `shap_base`。採用されなかった列は、寄与が常に 0 なので出さない。列の順は、`shap_base`、`selected_columns` の順の `shap_<列名>`。
-- 分類の寄与の単位は、モデルによって違う（対数オッズか確率か）。多値分類では、クラスごとに列を出す（`classes_` の順に、`shap_base_<クラス>`、`shap_<クラス>_<列名>`。クラス名は `str()`）。
+- 分類の寄与の単位は、モデルによって違う（`ridge`（`LogisticRegression`）と `lightgbm` は対数オッズ、`random_forest` は確率）。多値分類では、クラスごとに列を出す（`classes_` の順に、`shap_base_<クラス>`、`shap_<クラス>_<列名>`。クラス名は `str()`）。
 - フィルタの外の行は、SHAP の列も NaN にする。
 
 スコア（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実装、`mloom.evaluation`）:
@@ -647,7 +648,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   - `data.n_rows_with_infinite` を `n_rows_with_infinite_target`（目的変数の無限大で外した行数）にした。`infinite_by_column` は残す。
   - `settings` を表ごとの入れ子にし、`[clip]` と `[impute]` の値を足した。`sources` も表ごとの入れ子。
   - `preprocessing.clip` に、最終モデルのクリップの方式・上下限・クリップしなかった列を足した。
-  - `versions.lightgbm` をなくした。
+  - `versions.lightgbm` をなくした（Issue #20 で戻した）。
 
 ```json
 {
@@ -707,7 +708,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   "hpo": {"sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 100, "n_trials_failed": 0, "timeout": null, "best_trial": 57},
   "best_params": {"alpha": 0.31, "k": 42},
   "cv_scores": {"folds": [0.81, 0.79, 0.84, 0.80, 0.82], "mean": 0.812, "std": 0.017},
-  "versions": {"python": "3.13.13", "mloom": "0.1.0", "scikit-learn": "1.9.1", "optuna": "5.1.0", "polars": "2.2.0", "numpy": "...", "scipy": "..."}
+  "versions": {"python": "3.13.13", "mloom": "0.1.0", "scikit-learn": "1.9.1", "lightgbm": "4.7.0", "optuna": "5.1.0", "polars": "2.2.0", "numpy": "...", "scipy": "..."}
 }
 ```
 
@@ -901,13 +902,13 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | 5 | 特徴量選択の方法 | `f_regression`・`f_classif` のランクの上位 `k` 列（`k` を HPO で探索）。相関の高い列の間引きを足すか |
 | 6 | `unavailable-sensors.json` の形式と照合 | `{"sensors": [{"name", "reason"}]}`、列名の完全一致。接頭辞やパターンでの照合が要るか |
 | 7 | 数値でない列の扱い | 除外する（エンコードしない） |
-| 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`hist_gradient_boosting`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |
+| 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`lightgbm`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |
 | 9 | 選べるモデル | 表の 4 つで始める。API から任意の推定器と探索空間を渡せるようにするか |
 | 10 | 予測の入口 | **決定**（2026-11-26）: `mloom predict` の CLI と Python API を用意する。`pickle.load` だけでも予測できるようにする。→「予測」 |
 | 11 | HPO の試行の記録 | 記録は最良の試行だけ。全試行を `trials.csv` に出すか |
 | 12 | Skill の配布方法 | **決定**（2026-11-26）: 各ベンダーの既定の置き場所に、clone の Skill を指すジャンクションを置く。→「配布と実行」 |
 | 13 | 利用環境への導入 | **決定**（2026-11-26）: 利用側リポジトリとは別に clone し、`uv run --project <clone>` で実行する。→「配布と実行」 |
-| 14 | 並列実行 | Optuna の `n_jobs` やモデルの `n_jobs` を使うか（再現性とのトレードオフ）。`HistGradientBoosting` の OpenMP のスレッド数は結果を変えない（2026-11-26 確認。「モデル」） |
+| 14 | 並列実行 | Optuna の `n_jobs` やモデルの `n_jobs` を使うか（再現性とのトレードオフ）。今は `lightgbm`・`random_forest` の `n_jobs` を 1 に固定している（「モデル」）。LightGBM を `deterministic=True` で並列にするかも含む |
 | 15 | 複数の目的変数 | 「まずは 1 個」の次の段階で、目的変数ごとに別の Pipeline を作るか、1 つのモデルで同時に予測するか |
 | 16 | pickle の読み込みに mloom が要る | **決定**（2026-11-26）: mloom への依存をなくし、`ColumnTransformer` で列を選ぶ。→「`model.pkl`」 |
 | 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、記録と標準エラーに警告を出すか |
@@ -932,7 +933,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 - `mloom optimize` の出力が `model.pkl` 1 つになり、記録は scikit-learn と numpy の無い Python でも読め、`mloom show` で JSON に出せる。記録の入っていない `model.pkl` は終了コード 2 で止まり、保存の途中で失敗しても前の `model.pkl` は壊れない（2026-11-26、Issue #18 のテストで確認）。
 - `mloom predict` で予測すると、入力と同じ行数・同じ順で予測が返り、フィルタの条件を満たさない行は NaN になる（2026-11-26 テストで確認）。
 - 学習に使った表をそのまま `mloom predict` に渡すと、最終モデルの学習に使った行だけで `used_for_training` が true になる（説明変数が同じで目的変数だけが欠損した行は false になる）（2026-11-26 テストで確認）。
-- 欠損を含むデータで、補完しない既定のまま `hist_gradient_boosting` と `random_forest` を学習できる（2026-11-26 テストで確認）。
+- 欠損を含むデータで、補完しない既定のまま `lightgbm` と `random_forest` を学習できる（2026-11-26 テストで確認）。
 - `--shap` を付けると、行ごとに `shap_base` と SHAP の寄与の合計が予測値（分類は対数オッズか確率）と一致する（2026-11-26 テストで確認）。
 - `train_filters` で 9 月までに絞って学習すると、1 年分を `mloom predict` に渡したとき、10 月以降の行も予測され、`used_for_training` が false になる（2026-11-26 テストで、`train_filters` で外した行が予測されて false になることを確認）。
 - 回帰の `mloom predict` で、学習期間の後の行だけに `error` が入り、`rmse`・`r2` がその行だけで計算される（2026-11-26 テストで確認）。
@@ -940,5 +941,5 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 - `str_contains_all`・`str_contains_any` と、日時の列との比較で、学習の行を絞れる（2026-11-26 テストで確認）。
 - 説明変数に無限大がある行も、学習から外されず、予測でも値が返る（2026-11-26 テストで確認）。
 - クリップと補完のそれぞれの方式で、学習と予測ができる（2026-11-26 テストで確認）。
-- 上の 4 つのモデルは、`lightgbm` を `hist_gradient_boosting` に置き換えたもので確かめる（2026-11-26 テストで確認）。
+- 上の 4 つのモデルは、`hist_gradient_boosting` を `lightgbm` に戻したもので確かめる（2026-11-26、Issue #20 のテストで確認）。
 - ジャンクションで配った Skill の手順で clone の場所が求まり、利用側リポジトリの直下から `uv run --project <clone>` で `mloom optimize` と `mloom predict` を実行できる（2026-11-26 Issue #7 で `tmp/` の偽の clone の置き場所と利用側リポジトリで確認。実際の Claude Code のセッションからの実行は未確認で、merge 後にユーザーが確かめる）。

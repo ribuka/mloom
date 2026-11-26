@@ -1,6 +1,6 @@
 ---
 name: model-optimization
-description: Optimize a machine-learning model on a Parquet file with mloom - exclude unavailable sensors, select features, tune hyperparameters with CV, and save the fitted pipeline with the record of the run as model.pkl - or predict a Parquet file with a saved model.pkl (scores, confusion matrix, SHAP contributions), then explain the result. Use when the user asks to build, tune, or optimize a regression or classification model (ridge, pls, random_forest, hist_gradient_boosting) on Parquet data, or to predict with a model mloom saved, e.g. "この Parquet で品質を予測するモデルを最適化して", "hist_gradient_boosting で特徴量選択とハイパラ探索をして", "この model.pkl で新しいデータを予測して".
+description: Optimize a machine-learning model on a Parquet file with mloom - exclude unavailable sensors, select features, tune hyperparameters with CV, and save the fitted pipeline with the record of the run as model.pkl - or predict a Parquet file with a saved model.pkl (scores, confusion matrix, SHAP contributions), then explain the result. Use when the user asks to build, tune, or optimize a regression or classification model (ridge, pls, random_forest, lightgbm) on Parquet data, or to predict with a model mloom saved, e.g. "この Parquet で品質を予測するモデルを最適化して", "lightgbm で特徴量選択とハイパラ探索をして", "この model.pkl で新しいデータを予測して".
 ---
 
 # Model optimization
@@ -37,7 +37,7 @@ Test-Path -LiteralPath (Join-Path $clone 'pyproject.toml'), (Join-Path $clone 'c
 | Data | positional | a Parquet file |
 | Target (one column) | `--target` | a column of the data |
 | Regression or classification | `--task` | `regression`, `classification` |
-| Model | `--model` | `ridge`, `pls` (regression only), `random_forest`, `hist_gradient_boosting` |
+| Model | `--model` | `ridge`, `pls` (regression only), `random_forest`, `lightgbm` |
 | CV method | `--cv` | `timeseries` (needs `--time-column`), `group` (needs `--group-column`), `kfold` |
 
 - Ask the user for any input they did not give. Ask all missing ones in one message.
@@ -148,5 +148,5 @@ Read the output Parquet (for example with `uv run --project "<clone>" python -c 
   - The input has no target column: all of them are null.
   - No row is scored: `rmse` and `r2` are null. With one scored row, `r2` is null (R² needs two rows or more).
   - The denominator is 0: `precision` (no predicted positive) or `recall` (no actual positive) is null.
-- The SHAP contributions are for the input of the estimator (after preprocessing and the column selection; standardized values for `ridge` and `pls`). The base value plus the contributions equals the prediction in regression, the log odds for `hist_gradient_boosting` and `ridge` (logistic regression) in classification, and the probability for `random_forest`. Binary classification shows the contributions for `classes_[1]`.
+- The SHAP contributions are for the input of the estimator (after preprocessing and the column selection; standardized values for `ridge` and `pls`). The base value plus the contributions equals the prediction in regression, the log odds for `lightgbm` and `ridge` (logistic regression) in classification, and the probability for `random_forest`. Binary classification shows the contributions for `classes_[1]`.
 - NEVER compute a score or a metric yourself (from `prediction`, `error`, or the training rows): report the values mloom wrote. Counting the values of `cm` or `passed_filter` to describe them is fine.

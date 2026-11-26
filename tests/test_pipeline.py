@@ -9,6 +9,7 @@ import pytest
 from mloom.clip import describe_clip
 from mloom.config import Config
 from mloom.errors import InputError
+from mloom.models import MODELS
 from mloom.pipeline import (
     Preprocessing,
     fit_preprocess,
@@ -114,8 +115,8 @@ def test_other_imputations_leave_no_missing_value(impute: str) -> None:
         ("ridge", "auto", "median"),
         ("pls", "auto", "median"),
         ("random_forest", "auto", "none"),
-        ("hist_gradient_boosting", "auto", "none"),
-        ("hist_gradient_boosting", "knn", "knn"),
+        ("lightgbm", "auto", "none"),
+        ("lightgbm", "knn", "knn"),
         ("ridge", "iterative", "iterative"),
     ],
 )
@@ -138,3 +139,16 @@ def test_no_imputation_needs_a_model_that_handles_missing_values(
     settings.write_text("[impute]\nmethod = 'none'\n", encoding="utf-8")
     with pytest.raises(InputError, match=f"'none' needs a model that handles missing values; '{model}' does not"):
         plan_preprocessing(make_config(model=model), load_settings(settings))
+
+
+@pytest.mark.parametrize("task", ["regression", "classification"])
+def test_lightgbm_estimator_has_the_fixed_arguments(task: str) -> None:
+    """LightGBM runs on 1 thread with the seed, samples rows at every iteration and logs nothing."""
+    params = MODELS["lightgbm"].builders[task]({"num_leaves": 16}, 7).get_params()
+    assert {key: params[key] for key in ("n_jobs", "random_state", "subsample_freq", "verbose", "num_leaves")} == {
+        "n_jobs": 1,
+        "random_state": 7,
+        "subsample_freq": 1,
+        "verbose": -1,
+        "num_leaves": 16,
+    }

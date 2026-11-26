@@ -75,7 +75,7 @@ def test_parquet_path_and_dataframe_agree(
     assert from_path.best_params == from_frame.best_params
 
 
-@pytest.mark.parametrize("model", ["random_forest", "hist_gradient_boosting"])
+@pytest.mark.parametrize("model", ["random_forest", "lightgbm"])
 def test_same_seed_gives_same_result(frame: pl.DataFrame, make_config: Callable[..., Config], model: str) -> None:
     """Two runs with the same data, config and seed select the same columns and parameters."""
     config = make_config(model=model)
@@ -92,7 +92,7 @@ def test_pipeline_ignores_extra_columns_and_order(frame: pl.DataFrame, make_conf
     np.testing.assert_allclose(result.pipeline.predict(shuffled), result.pipeline.predict(frame))
 
 
-@pytest.mark.parametrize("model", ["ridge", "hist_gradient_boosting"])
+@pytest.mark.parametrize("model", ["ridge", "lightgbm"])
 def test_only_rows_with_an_infinite_target_are_dropped(
     frame: pl.DataFrame, make_config: Callable[..., Config], model: str
 ) -> None:
@@ -258,15 +258,15 @@ def with_missing(frame: pl.DataFrame) -> pl.DataFrame:
     ("method", "model", "imputed"),
     [
         ("auto", "ridge", True),
-        ("auto", "hist_gradient_boosting", False),
+        ("auto", "lightgbm", False),
         ("auto", "random_forest", False),
-        ("none", "hist_gradient_boosting", False),
+        ("none", "lightgbm", False),
         ("median", "ridge", True),
-        ("mean", "hist_gradient_boosting", True),
+        ("mean", "lightgbm", True),
         ("most_frequent", "ridge", True),
-        ("constant", "hist_gradient_boosting", True),
+        ("constant", "lightgbm", True),
         ("knn", "ridge", True),
-        ("iterative", "hist_gradient_boosting", True),
+        ("iterative", "lightgbm", True),
     ],
 )
 def test_each_imputation_fits_and_predicts(

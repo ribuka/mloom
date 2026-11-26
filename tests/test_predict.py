@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 import pytest
+from lightgbm import LGBMClassifier
 from sklearn.base import is_classifier
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
@@ -107,7 +108,7 @@ def test_used_for_training_marks_exactly_the_rows_trained_on(data: pl.DataFrame,
     assert not output.tail(9)["used_for_training"].any()
 
 
-@pytest.mark.parametrize("model", ["ridge", "hist_gradient_boosting"])
+@pytest.mark.parametrize("model", ["ridge", "lightgbm"])
 def test_rows_with_infinite_features_are_predicted(
     data: pl.DataFrame, make_config: Callable[..., Config], model: str
 ) -> None:
@@ -209,7 +210,7 @@ np.save(sys.argv[3], bundle["pipeline"].predict(pl.read_parquet(sys.argv[2])))
         ("ridge", "regression", "y", ""),
         ("random_forest", "classification", "c", ""),
         ("ridge", "regression", "y", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'knn'\n"),
-        ("hist_gradient_boosting", "classification", "c", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'iterative'\n"),
+        ("lightgbm", "classification", "c", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'iterative'\n"),
     ],
 )
 def test_model_pkl_is_read_and_predicts_without_mloom(
@@ -566,6 +567,8 @@ def _model_output(estimator: Any, x: np.ndarray) -> np.ndarray:  # noqa: ANN401 
     if isinstance(estimator, RandomForestClassifier):
         output = estimator.predict_proba(x)
         return output[:, 1:] if output.shape[1] == 2 else output
+    if isinstance(estimator, LGBMClassifier):  # no decision_function
+        return np.asarray(estimator.predict(x, raw_score=True)).reshape(len(x), -1)
     return np.asarray(estimator.decision_function(x)).reshape(len(x), -1)
 
 
@@ -575,13 +578,13 @@ def _model_output(estimator: Any, x: np.ndarray) -> np.ndarray:  # noqa: ANN401 
         ("ridge", "regression", 0),
         ("pls", "regression", 0),
         ("random_forest", "regression", 0),
-        ("hist_gradient_boosting", "regression", 0),
+        ("lightgbm", "regression", 0),
         ("ridge", "classification", 2),
         ("random_forest", "classification", 2),
-        ("hist_gradient_boosting", "classification", 2),
+        ("lightgbm", "classification", 2),
         ("ridge", "classification", 3),
         ("random_forest", "classification", 3),
-        ("hist_gradient_boosting", "classification", 3),
+        ("lightgbm", "classification", 3),
     ],
 )
 def test_shap_contributions_add_up_to_the_output(
