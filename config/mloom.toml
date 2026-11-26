@@ -46,3 +46,8 @@ n_neighbors = 5
 # Feature columns whose |Spearman correlation| is above this are clustered, and only the
 # representative of each cluster can be selected. 0 to 1; 1 clusters nothing.
 max_correlation = 0.9
+
+[importance]
+# How many times each group of columns is permuted on the test side of each CV fold for the
+# permutation importance in the record of the run. An integer of 0 or more; 0 does not compute it.
+n_repeats = 5

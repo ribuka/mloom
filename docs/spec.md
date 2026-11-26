@@ -181,6 +181,10 @@ n_neighbors = 5
 # スピアマンの |ρ| がこの値を超える説明変数をクラスタにまとめ、各クラスタの代表だけを採用の候補にする。
 # 0 〜 1。1 なら何もまとめない。既定 0.9
 max_correlation = 0.9
+
+[importance]
+# permutation importance で、各分割の評価側の行で列のグループを並べ替える回数。0 以上の整数。0 なら計算しない。既定 5
+n_repeats = 5
 ```
 
 - キーは「表とキーの名前の組」で区別する（2026-11-26 実装で決定）。`[clip] method` と `[impute] method` は別のキーで、ファイルごとの優先順位もキーごとに決まる。
@@ -481,6 +485,53 @@ max_correlation = 0.9
 - たたき台の実装にあった `lightgbm`（追加の依存 `mloom[lightgbm]`）は、いったん `hist_gradient_boosting` に置き換えたが、Issue #20 で `lightgbm` に戻した（2026-11-26 に実装。「勾配ブースティング」）。lightgbm は `pyproject.toml` の通常の依存で、記録の `versions.lightgbm` に版を残す。`hist_gradient_boosting` を指定すると、ほかの知らないモデル名と同じく学習の前に止まる（終了コード 2）。古い名前を読み替える処理は作らない（`AGENTS.md`）。
 - `task` に対応しないモデルを指定したら、学習を始める前にエラーで止める（終了コード 2）。
 
+### 解釈
+
+2026-11-26 のユーザー判断（Issue #14）。2026-11-26 に実装（`mloom.interpretation`）。Skill がモデルの解釈を言葉にする材料として、`mloom optimize` が次の 3 つを決定論的に計算し、記録の `interpretation` に残す。Skill は指標を自分で計算しない決まり（「Skill」）なので、材料の数値は mloom が出す。ALE・PD・ICE・c-ICE・サロゲート決定木・H 統計量・反実仮想・CV の分割ごとの安定性・図（PNG）は入れない（ユーザーが permutation importance を選んだ。係数と VIP は線形モデルで一番正確な解釈になるため）。
+
+設定は `[importance] n_repeats`（既定 5。0 以上の整数。真偽値・小数・負の数・文字列は `InputError`、終了コード 2）。使った値は記録の `settings.importance.n_repeats` と `settings.sources.importance.n_repeats` に残る。CLI の引数は足さない（設定ファイルだけで変える）。
+
+#### permutation importance（`n_repeats >= 1` のとき）
+
+- 計算する時点: 探索（`_search`）と最終学習の後。CV の分割ごとのモデルが要り、それは `optimize_model` だけが持つため、`mloom optimize` の中で計算する（追加のデータも要らない）。
+- グループ: 最終モデルの `selected_columns` の列 `s` ごとに 1 グループ。グループの列は、`s` を含む相関クラスタ（「特徴量選択」）の列のすべて（候補列の順）。1 列だけのクラスタなら `s` だけ。似た列をまとめて入れ替えるのは、分割ごとに代表が違う列になっても同じグループとして測れるようにし、代表でない列が補完（`knn`・`iterative`）で使われていても重要度が小さく出ないようにするため。
+- 分割ごとの処理: CV の分割のそれぞれで、
+  1. 探索が作ったその分割の前処理と順位（`_prepare_fold` の結果。`_search` が返す）と、最良の試行のパラメータと `k` でパイプラインを作り、学習側の行で学習する（最良の試行の、その分割の学習と同じ）。
+  2. 評価側の行での指標の値（`metric.report_value` の値）を基準にする。最良の試行の、その分割の `cv_scores.folds` と一致する。
+  3. グループごとに `n_repeats` 回、評価側の行の並べ替え（`rng.permutation(評価側の行数)`）を 1 つ作り、グループの列のすべてに同じ並べ替えを当てた行列で指標の値を求める。入れ替えるのは候補列の生の値の行列（`to_matrix`）の列。
+  4. 1 回ごとの悪化は、最小化する指標なら「入れ替えた後 − 基準」、最大化する指標なら「基準 − 入れ替えた後」。正の値が「入れ替えるとスコアが悪くなる＝効いている」を表す（Skill が向きを取り違えないように、指標の向きによらず揃える）。その分割の重要度は `n_repeats` 回の平均。
+- 乱数: `np.random.default_rng(seed)` を 1 つ作り、分割の順 → グループの順（`selected_columns` の順）→ 繰り返しの順で使う。
+- グループごとに、分割の重要度の平均（`mean`）と母標準偏差（`std`。`cv_scores` と同じく `np.std`）と、分割ごとの値（`folds`）を残す。並べ方は `mean` の降順、同じ値なら `selected_columns` の順。
+- 分割のモデルがそのグループの列を使っていなければ、その分割の重要度は 0 に近くなる（補完が列をまたがなければ 0）。分割によって採用された列が違うことの手がかりになる。
+- 学習や評価で例外が出たときは、`OptimizationError` にせずそのまま投げる（終了コード 1）。最良の試行ではどの分割も成功しているので、起きるのは想定外のときだけ。
+- `n_repeats = 0` なら計算せず、`permutation_importance` を `null` にする。分割ごとの学習もしない。
+- 処理の重さ: 最良のパラメータでの分割数ぶんの学習と、「グループ数 × `n_repeats` × 分割数」回の予測が増える。探索全体より小さく、`n_repeats` で減らすか 0 で止められるので受け入れる。
+
+#### 線形モデルの係数（`ridge`・`pls`。最終モデル）
+
+- 1σ あたりの係数（`per_std`）: 推定器への入力（標準化した後の値）で、採用した列を 1 だけ動かしたときの出力の変化。線形の SHAP（「SHAP の寄与」）と同じく、`shap_background` の点と、そこから列ごとに 1 だけ動かした点での出力の差で求める（`mloom.explain.linear_weights` を共通に使う）。推定器ごとの係数の持ち方（`PLSRegression` の中心化など）に依らないため。出力は、回帰は `predict`、分類（`LogisticRegression`）は `decision_function`（対数オッズ）。
+- 元の単位あたりの係数（`per_unit`）: `per_std / σ`。σ は前処理の `scale` の段（`StandardScaler`）の `scale_` のうち、その列の値。
+- 分類: 2 値は `classes_[1]` の対数オッズについて出し（SHAP と同じ）、`class` は `str(classes_[1])`。多値はクラスごとに出し、`class` は `str()` にしたクラス。回帰の `class` は `null`。記録だけから、どのクラスの対数オッズかが分かるようにするため（2026-11-26 実装。クロスレビューの指摘で、2 値も `null` にしていたのを直した）。
+- 係数は、クリップの上下限の中で、ほかの列を固定したときの変化。上下限の外では、元の値を動かしても出力は変わらない。
+- 並べ方: クラスごとに（`classes_` の順）、`abs(per_std)` の降順。同じ値なら `selected_columns` の順。
+- 木のモデル（`random_forest`・`lightgbm`）では `coefficients` を `null` にする。
+
+#### PLS の VIP（`pls`。最終モデル）
+
+- `PLSRegression` の `x_weights_`（W、列 × 成分）と `y_loadings_`（q、1 × 成分）を使う。成分の得点 T は、最終モデルの学習に使った行の推定器への入力（`estimator_input`）を推定器の `transform` に通した値（`x_scores_` の有無に依らないため）。
+- 成分 a の説明量 `SS_a = q_a² · (T_aᵀ T_a)`。列 j の VIP = `sqrt(p · Σ_a SS_a · (W_ja / ‖W_a‖)² / Σ_a SS_a)`。p は採用した列の数。
+- `Σ_a SS_a` が 0 のときは、すべての列の `vip` を `null` にする（記録に NaN を書かないため）。
+- 目的変数を成分数より前に説明し切ると、残りの成分の `x_weights_` は 0 になる（`‖W_a‖ = 0`）。その成分の `(W_ja / ‖W_a‖)²` は 0 として扱う（2026-11-26 実装。クロスレビューの指摘）。そのままでは `0 / 0` の NaN が `SS_a = 0` を掛けても残り、すべての列の VIP が NaN になるため。`[(-1,-1), (-1,1), (1,-1), (1,1)]` を 4 回繰り返した 2 列と `y = 1 列目` を `n_components = 2` で学習すると、2 つ目の成分の重みが 0 になり、VIP は 1 列目が √2、2 列目が 0 になることを確かめた（`tests/test_interpretation.py`）。
+- 並べ方: `vip` の降順。同じ値なら `selected_columns` の順。`pls` 以外では `vip` を `null` にする。
+
+2026-11-26 にテストで確かめたこと（`tests/test_interpretation.py`。scikit-learn 1.9.1、lightgbm 4.7.0）:
+
+- 4 つのモデルと 2 つのタスク（`pls` は回帰だけ）で、分割ごとに学習し直したモデルの評価側の指標の値が、最良の試行の `cv_scores.folds` と相対誤差 1e-12 以内で一致する。
+- `y = 3a + b + 小さい雑音` と `a2 = a + 小さい雑音` のデータで、`ridge` と `lightgbm` のどちらでも、`a`・`a2` のグループ（`columns` が `["a", "a2"]`）が先頭で、`b` のグループの `mean` は 0 より大きく先頭より小さい。
+- 平均 300・標準偏差 50 の列を含むデータで、`ridge` の回帰・2 値分類・3 値分類と `pls` の回帰について、元の値を +1 したときの出力（`predict`・`decision_function`）の差が `per_unit` と相対誤差 1e-9 以内で一致し、`per_std` は `per_unit × scale_` と相対誤差 1e-12 以内で一致する。
+- `pls` の `vip` の二乗の和は、採用した列の数と相対誤差 1e-9 以内で一致し、目的変数に一番強く効く列の `vip` が最大。
+- 同じ入力・設定・seed の 2 回の実行で `interpretation` が完全に一致する。記録は `json.dumps(..., allow_nan=False)` で書ける。
+
 ## 出力
 
 `output_dir` に次を保存する。
@@ -686,6 +737,12 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
 
 - 一番上の `selection`（`selected_columns` の直前）と、`settings.selection` を足した（2026-11-26、Issue #13。「特徴量選択」）。`selection.n_clusters` はクラスタの数（1 列だけのクラスタも数える）。`selection.clusters` は 2 列以上のクラスタだけを候補列の順に並べ、`representative` は最終モデルでそのクラスタの代表になった列、`selected` はそれが `selected_columns` に入っているか。
 
+- 一番上の `interpretation`（`cv_scores` の直後）と、`settings.importance` を足した（2026-11-26、Issue #14。「解釈」）。Skill が 1 か所を読めば済むように、3 つをまとめる。
+  - `permutation_importance`: `metric`、`n_repeats`、`groups`（`column` は最終モデルが採用した列、`columns` はグループとして入れ替えた列（候補列の順）、`mean`・`std`・`folds`）。`n_repeats = 0` なら `null`。
+  - `coefficients`: `output`（`"prediction"` か `"log_odds"`）と `columns`（`class`・`column`・`per_unit`・`per_std`）。木のモデルでは `null`。
+  - `vip`: `columns`（`column`・`vip`）。`pls` 以外では `null`。
+  - Python API では `Result.interpretation`（同じ辞書）。`model.pkl` の 2 段目（モデル）は変えない。
+
 ```json
 {
   "mloom_version": "0.1.0",
@@ -715,12 +772,14 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
     "clip": {"method": "iqr", "lower_quantile": 0.01, "upper_quantile": 0.99, "iqr_k": 1.5, "mad_k": 3.0, "sigma_k": 3.0},
     "impute": {"method": "auto", "fill_value": 0.0, "n_neighbors": 5},
     "selection": {"max_correlation": 0.9},
+    "importance": {"n_repeats": 5},
     "sources": {
       "columns": {"max_missing_rate": "config/mloom.toml"},
       "preprocessing": {"use_unlabeled_rows": "C:/.../mloom/config/mloom.toml"},
       "clip": {"method": "config/mloom.toml", "lower_quantile": "C:/.../mloom/config/mloom.toml", "...": "..."},
       "impute": {"method": "C:/.../mloom/config/mloom.toml", "...": "..."},
-      "selection": {"max_correlation": "C:/.../mloom/config/mloom.toml"}
+      "selection": {"max_correlation": "C:/.../mloom/config/mloom.toml"},
+      "importance": {"n_repeats": "C:/.../mloom/config/mloom.toml"}
     },
     "files": [
       {"role": "project", "path": "config/mloom.toml", "found": true},
@@ -755,6 +814,24 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   "hpo": {"sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 100, "n_trials_failed": 0, "timeout": null, "best_trial": 57},
   "best_params": {"alpha": 0.31, "k": 42},
   "cv_scores": {"folds": [0.81, 0.79, 0.84, 0.80, 0.82], "mean": 0.812, "std": 0.017},
+  "interpretation": {
+    "permutation_importance": {
+      "metric": "rmse",
+      "n_repeats": 5,
+      "groups": [
+        {"column": "FI-101A", "columns": ["FI-101A", "FI-101B", "FI-102"], "mean": 0.42, "std": 0.05, "folds": [0.40, 0.47, 0.38, 0.45, 0.41]},
+        {"column": "TI-301", "columns": ["TI-301"], "mean": 0.03, "std": 0.04, "folds": [0.10, 0.0, 0.0, 0.05, 0.0]}
+      ]
+    },
+    "coefficients": {
+      "output": "prediction",
+      "columns": [
+        {"class": null, "column": "FI-101A", "per_unit": 0.031, "per_std": 1.24},
+        {"class": null, "column": "TI-301", "per_unit": -0.8, "per_std": -0.21}
+      ]
+    },
+    "vip": null
+  },
   "versions": {"python": "3.13.13", "mloom": "0.1.0", "scikit-learn": "1.9.1", "lightgbm": "4.7.0", "optuna": "5.1.0", "polars": "2.2.0", "numpy": "...", "scipy": "..."}
 }
 ```
@@ -776,6 +853,7 @@ result = mloom.optimize_model(
 )
 result.pipeline      # 学習済み Pipeline
 result.cv_scores     # CV のスコア
+result.interpretation  # 重要度・係数・VIP（「解釈」）
 result.save("outputs/ridge")  # model.pkl（記録とモデル）。戻り値はそのパス
 mloom.read_run("outputs/ridge/model.pkl")  # 記録（「記録」）の辞書。モデルは読まない
 ```
@@ -856,7 +934,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 - 予測: ユーザーが予測を頼んだときに `mloom predict` を実行する。`--output` は、ユーザーが示さなければ `<model.pkl のディレクトリ>/predictions.parquet` にする（`mloom optimize` の `--output` を `outputs/<target>-<model>-<cv>` にするのと同じく、Skill が引数を作るための既定）。
   - 混同行列の閾値・陽性の向き・陽性のクラスは、ユーザーが示したときだけ渡す。一部だけ示されたら、残りを聞く。
   - `--shap` は、ユーザーが寄与を頼んだときだけ付ける。`--keep-columns` は、ユーザーが示した列だけ。
-- 設定: 利用側の `config/mloom.toml`（`max_missing_rate`・`use_unlabeled_rows`・`[clip]`・`[impute]`・`[selection]`）と `config/unavailable-sensors.json` を、ユーザーに頼まれない限り書き換えない。頼まれたときも、ユーザーが示したキーを、示した値にするだけ。
+- 設定: 利用側の `config/mloom.toml`（`max_missing_rate`・`use_unlabeled_rows`・`[clip]`・`[impute]`・`[selection]`・`[importance]`）と `config/unavailable-sensors.json` を、ユーザーに頼まれない限り書き換えない。頼まれたときも、ユーザーが示したキーを、示した値にするだけ。
 
 ### 配布と実行
 
@@ -936,7 +1014,8 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.prediction` | 予測の入口（`predict`）。`mloom.predict` にしない理由は「Python API」 |
 | `mloom.training_period` | 学習期間の終わり（`last_time`）と、その後の行の判定 |
 | `mloom.evaluation` | 学習期間の後の行での、予測のスコアと混同行列 |
-| `mloom.explain` | 採用した列ごとの SHAP の寄与と、線形の SHAP の基準（`shap_background`） |
+| `mloom.explain` | 採用した列ごとの SHAP の寄与と、線形の SHAP の基準（`shap_background`）・線形モデルの重み |
+| `mloom.interpretation` | 記録の `interpretation`：CV の分割ごとの、似た列のグループの permutation importance と、最終モデルの線形モデルの係数・PLS の VIP |
 | `mloom.cli` / `mloom.__main__` | CLI |
 
 ## 未決事項

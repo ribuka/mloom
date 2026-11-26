@@ -114,12 +114,57 @@ def shap_columns(
     return [pl.Series(name, flat[:, index]) for index, name in enumerate(shap_names(pipeline))]
 
 
+def is_linear(estimator: Any) -> bool:  # noqa: ANN401 - any estimator of the models
+    """Tell whether an estimator is one of the linear models (``ridge`` and ``pls``).
+
+    Parameters
+    ----------
+    estimator : Any
+        The estimator of a pipeline.
+
+    Returns
+    -------
+    bool
+        ``False`` for the tree models, ``True`` otherwise.
+    """
+    return not isinstance(estimator, _TREES)
+
+
+def linear_weights(estimator: Any, background: np.ndarray) -> tuple[np.ndarray, np.ndarray]:  # noqa: ANN401 - a linear model
+    """Compute the output of a linear model at the background and its change along each column.
+
+    The output is the prediction for regression and the log odds
+    (``decision_function``) for classification; for 2 classes, those of
+    ``classes_[1]``. It is affine in the input, so its change when a column of
+    the input moves by 1 from the background is the weight of that column.
+
+    Parameters
+    ----------
+    estimator : Any
+        A fitted linear model (``is_linear``).
+    background : np.ndarray
+        A point of the input of the estimator (``shap_background``).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        The output at the background, of shape ``(outputs,)``, and the
+        weights, of shape ``(columns, outputs)``. There is one output for
+        regression and for 2 classes, and one for each class otherwise.
+    """
+    output = estimator.decision_function if is_classifier(estimator) else estimator.predict
+    probes = np.vstack([background, background + np.eye(background.size)])
+    outputs = np.asarray(output(probes), dtype=np.float64).reshape(probes.shape[0], -1)
+    return outputs[0], outputs[1:] - outputs[0]
+
+
 def _explain(pipeline: Pipeline, x: np.ndarray, background: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     # The base of shape (outputs,) and the contributions of shape (rows, columns, outputs).
     estimator = pipeline[-1]
-    if isinstance(estimator, _TREES):
+    if not is_linear(estimator):
         return _tree(estimator, x)
-    return _linear(_output(estimator), x, background)
+    base, weights = linear_weights(estimator, background)
+    return base, (x - background)[:, :, None] * weights[None, :, :]
 
 
 def _tree(estimator: Any, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:  # noqa: ANN401 - a tree model
@@ -137,15 +182,3 @@ def _tree(estimator: Any, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:  # no
         # RandomForestClassifier explains both probabilities; keep those of classes_[1].
         return base[1:], contributions[:, :, 1:]
     return base, contributions
-
-
-def _output(estimator: Any) -> Any:  # noqa: ANN401 - an estimator and its output function
-    return estimator.decision_function if is_classifier(estimator) else estimator.predict
-
-
-def _linear(output: Any, x: np.ndarray, background: np.ndarray) -> tuple[np.ndarray, np.ndarray]:  # noqa: ANN401 - the output function of a linear model
-    # The output is affine in x: its weights are its changes from the background along each column.
-    probes = np.vstack([background, background + np.eye(background.size)])
-    outputs = np.asarray(output(probes), dtype=np.float64).reshape(probes.shape[0], -1)
-    weights = outputs[1:] - outputs[0]
-    return outputs[0], (x - background)[:, :, None] * weights[None, :, :]

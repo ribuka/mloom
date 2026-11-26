@@ -21,6 +21,13 @@ from mloom.data import Data, load_data
 from mloom.errors import InputError, OptimizationError
 from mloom.explain import shap_background
 from mloom.filters import apply_filters
+from mloom.interpretation import (
+    FoldModels,
+    importance_groups,
+    linear_coefficients,
+    permutation_importance,
+    pls_vip,
+)
 from mloom.metrics import BINARY_ONLY_METRICS
 from mloom.pipeline import (
     Preprocessing,
@@ -94,7 +101,7 @@ def optimize_model(data: Data, config: Config) -> Result:
     clusters = correlation_clusters(x_statistics, settings.selection.max_correlation)
     cv_plan = plan_cv(rows, y, training.unlabeled, config)
 
-    study = _search(config, preprocessing, (x, y, x_unlabeled), clusters, cv_plan)
+    study, prepared = _search(config, preprocessing, (x, y, x_unlabeled), clusters, cv_plan)
     best = study.best_trial
     params = {name: value for name, value in best.params.items() if name != K_PARAM}
     preprocess = fit_preprocess(preprocessing, x_statistics)
@@ -103,6 +110,14 @@ def optimize_model(data: Data, config: Config) -> Result:
     pipeline = build_pipeline(config, params, preprocess, keep, columns.candidates)
     pipeline.fit(rows, y)
     fold_scores = best.user_attrs["fold_scores"]
+    background = shap_background(pipeline, rows)
+    importance = permutation_importance(
+        FoldModels(config, params, best.params[K_PARAM], cv_plan.folds, prepared),
+        (x, y),
+        importance_groups(keep, clusters),
+        columns.candidates,
+        settings.importance.n_repeats,
+    )
 
     return Result(
         pipeline=pipeline,
@@ -128,12 +143,17 @@ def optimize_model(data: Data, config: Config) -> Result:
         selected_columns=[columns.candidates[i] for i in keep],
         best_params=best.params,
         cv_scores={"folds": fold_scores, "mean": float(np.mean(fold_scores)), "std": float(np.std(fold_scores))},
+        interpretation={
+            "permutation_importance": importance.record,
+            "coefficients": linear_coefficients(pipeline, background),
+            "vip": pls_vip(pipeline, rows),
+        },
         cv=cv_plan.describe(config),
         hpo=_describe_search(study, config),
         created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
         training_hashes=np.unique(hash_rows(rows, hash_columns(columns.candidates, config))),
         last_time=last_time(rows, config.time_column),
-        shap_background=shap_background(pipeline, rows),
+        shap_background=background,
     )
 
 
@@ -157,7 +177,8 @@ def _search(
     data: tuple[np.ndarray, np.ndarray, np.ndarray],
     clusters: list[list[int]],
     cv_plan: CVPlan,
-) -> optuna.Study:
+) -> tuple[optuna.Study, list[tuple[Pipeline, np.ndarray]]]:
+    # Also returns the fitted preprocessing and the ranking of each fold (``_prepare_fold``).
     x, y, x_unlabeled = data
     # Only one representative of each cluster can be selected.
     n_clusters = len(clusters)
@@ -185,7 +206,7 @@ def _search(
     study.optimize(objective, n_trials=config.n_trials, timeout=config.timeout)
     if not _completed(study):
         raise OptimizationError("no trial finished with a score; see the warnings of the failed trials")
-    return study
+    return study, prepared
 
 
 def _prepare_fold(
