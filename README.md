@@ -132,9 +132,23 @@ uv run mloom optimize data/sample.parquet --base outputs/quality-lgbm/model.pkl 
 
 - 使った値は記録の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。実際に使った補完の方式（`auto` を読み替えた後の値）は `preprocessing.impute.method` に残ります（`settings.impute.method` は設定に書いた値のまま）。
 
+### 文字列の列（`lightgbm`）
+
+`--model lightgbm` では、文字列の列（polars の String・Categorical・Enum）もカテゴリの説明変数の候補になり、LightGBM のカテゴリ機能で学習します。ほかのモデルでは、今までどおり `non_numeric` として外れます。
+
+- 学習に使う行（目的変数が欠損した行も含む）にある値を昇順に並べて整数にします。予測時の null と、学習に無かった値（新しい銘柄など）は欠損として予測し、エラーにはしません。
+- 種類の多い列もそのまま使います。種類の少ない値をまとめる処理はありません。
+- カテゴリの列にはクリップ・補完・標準化をかけません（`[impute]` を指定しても欠損のまま）。
+- 候補列は「数値の列（データの順）→ 文字列の列（データの順）」に並びます。
+- カテゴリの列ごとのカテゴリの数は、記録の `preprocessing.categorical`（例: `{"grade": {"n_categories": 4}}`）に残ります。カテゴリの列が無いときは `{}` です。
+- 目的変数から作った列（サンプルデータの `grade` など）は、リークになるので `--exclude-columns` で外してください。
+
 ## 特徴量選択
 
 候補列を目的変数との F 統計量（回帰は `f_regression`、分類は `f_classif`）で順位付けし、上位 `k` 列を使います。`k` はハイパーパラメータと同時に探索します。
+
+- `lightgbm` の文字列の列（「文字列の列（`lightgbm`）」）は順位付けせず、列ごとに使うかどうかを探索します。記録の `best_params` の `use:<列名>` が `true` の列が採用されます。`k` は採用した数値の列の数です。数値の候補列が無いときは、`k` も `use:` も無く、文字列の列をすべて使います。
+- 文字列の候補列があるときは、LightGBM の `cat_smooth`（カテゴリの値ごとの統計を全体の平均に寄せる強さ）も探索し、`best_params.cat_smooth` に残ります。
 
 - スピアマンの |ρ| が `[selection] max_correlation`（既定 0.9）を超える列どうしはクラスタにまとめ、各クラスタからは代表 1 列（CV の分割ごとに、学習側で F 統計量が最大の列）だけを採用の候補にします。似た列の両方が採用されることはありません。`max_correlation = 1` にすると何もまとめません。
 - クラスタは記録の `selection` に残ります。`n_clusters` はクラスタの数、`clusters` は 2 列以上のクラスタごとの列（`columns`）、最終モデルの代表（`representative`）、その代表が採用されたか（`selected`）です。代表でない列も候補列のままで、前処理には使われます。
@@ -143,7 +157,7 @@ uv run mloom optimize data/sample.parquet --base outputs/quality-lgbm/model.pkl 
 
 `mloom optimize` は、モデルの解釈の材料を記録の `interpretation`（Python API では `Result.interpretation`）に残します。
 
-- `permutation_importance`: 採用した列ごとの重要度です。その列を含む似た列のクラスタ（「特徴量選択」）をまとめて 1 つのグループとし、CV の各分割で、最良の試行のモデルを学習し直し、評価側の行でグループの列を並べ替えたときに指標がどれだけ悪くなるかを測ります。正の値が「入れ替えると悪くなる＝効いている」で、指標の単位のままです。`groups` は `mean` の降順で、`column`（採用した列）、`columns`（並べ替えた列）、`mean`・`std`（分割の間の平均と母標準偏差）、`folds`（分割ごとの値）を持ちます。
+- `permutation_importance`: 採用した列ごとの重要度です。その列を含む似た列のクラスタ（「特徴量選択」。文字列の列はその列だけ）をまとめて 1 つのグループとし、CV の各分割で、最良の試行のモデルを学習し直し、評価側の行でグループの列を並べ替えたときに指標がどれだけ悪くなるかを測ります。正の値が「入れ替えると悪くなる＝効いている」で、指標の単位のままです。`groups` は `mean` の降順で、`column`（採用した列）、`columns`（並べ替えた列）、`mean`・`std`（分割の間の平均と母標準偏差）、`folds`（分割ごとの値）を持ちます。
   - 並べ替える回数は `config/mloom.toml` の `[importance] n_repeats`（既定 5。0 以上の整数）です。0 にすると計算せず `null` になり、分割ごとの学習もしません。
   - 分割ごとの学習と、「グループ数 × `n_repeats` × 分割数」回の予測のぶん、実行が長くなります。
 - `coefficients`（`ridge`・`pls`）: 最終モデルで、採用した列を元の単位で 1 だけ動かしたときの出力の変化（`per_unit`）と、1 標準偏差だけ動かしたときの変化（`per_std`）です。出力は、回帰は予測値（`output` が `"prediction"`）、分類は対数オッズ（`"log_odds"`）で、`class` はどのクラスの対数オッズかです（2 値は `classes_[1]` だけ、多値はクラスごと。回帰は `null`）。ほかの列を固定し、クリップの上下限の中で成り立つ値です。木のモデルでは `null` です。

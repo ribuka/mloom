@@ -79,7 +79,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 - 1 行が 1 サンプル、列がセンサ値などの説明変数と目的変数の、横持ちの表（案）。
 - 形式: Parquet ファイル（API と CLI）、`polars.DataFrame`（API のみ）。
-- 説明変数の候補は数値の列だけ（案）。文字列やカテゴリの列は除外して、記録に理由を残す。
+- 説明変数の候補は、数値と真偽値の列と、`model = "lightgbm"` のときの String・Categorical・Enum の列（2026-11-26 ユーザー判断。2026-11-27 に Issue #21 で実装。「カテゴリの列（`lightgbm`）」）。ほかの列（ほかのモデルの文字列の列、日時の列など）は除外して、記録に理由を残す。
 
 ### 設定（案）
 
@@ -262,7 +262,7 @@ n_repeats = 5
 | `str_contains_any` | 配列の文字列のどれかを含む（2026-11-26 ユーザー判断） | 文字列の配列 |
 
 - 比較の演算子では、欠損の行は条件を満たさない（polars の `filter` と同じ）。
-- `str_contains_all`・`str_contains_any` は、正規表現ではなく、文字の並びそのままで一致を見る（2026-11-26 ユーザー判断）。`.` や `(` を含むタグ名でも、思わぬ一致が起きないため。文字列の列でだけ使え、欠損の行は条件を満たさない。文字列の列は説明変数からは外れる（`non_numeric`）が、フィルタには使える。
+- `str_contains_all`・`str_contains_any` は、正規表現ではなく、文字の並びそのままで一致を見る（2026-11-26 ユーザー判断）。`.` や `(` を含むタグ名でも、思わぬ一致が起きないため。文字列の列でだけ使え、欠損の行は条件を満たさない。文字列の列は `lightgbm` 以外では説明変数から外れる（`non_numeric`）が、フィルタには使える。
 - 条件どうしの OR（入れ子）は足さない（2026-11-26 ユーザー判断）。「どれかを含む」は `str_contains_any` で書く。
 - 日時・日付の列（Datetime、Date）と比べる値は、ISO 8601 の文字列で書き、列の型に変換して比べる。
   - タイムゾーン付きの列と比べる値に、オフセットが無ければエラーで止める。タイムゾーンが無い列と比べる値に、オフセットがあってもエラーで止める。黙って変換すると、時刻のずれに気づけないため。
@@ -314,12 +314,12 @@ n_repeats = 5
 | `role` | `time_column`、`group_column` |
 | `user_excluded` | `exclude_columns` で指定した列 |
 | `unavailable_sensor` | 使えないセンサ |
-| `non_numeric` | 数値でも真偽値でもない列（案）。真偽値は 0/1 の数値として扱う |
+| `non_numeric` | 数値でも真偽値でもない列。ただし `lightgbm` では String・Categorical・Enum の列は外さず、カテゴリの候補列にする（2026-11-27、Issue #21。「カテゴリの列（`lightgbm`）」）。真偽値は 0/1 の数値として扱う |
 | `all_null` | すべて欠損の列（すべて無限大の列も含む） |
 | `constant` | 欠損を除いて値が 1 種類の列 |
 | `high_missing` | 「目的変数がある行での欠損率」か「目的変数が欠損した行も含めた全行での欠損率」のどちらかが、設定ファイルの `max_missing_rate`（既定 0.5）を超える列。`detail` に両方の欠損率を残す |
 
-- 浮動小数の列の NaN と +inf・-inf は欠損として扱う（無限大は 2026-11-26 に実装。Pipeline の中で NaN になるため。「行の除外」）。
+- 浮動小数の列の NaN と +inf・-inf は欠損として扱う（無限大は 2026-11-26 に実装。Pipeline の中で NaN になるため。「行の除外」）。カテゴリの候補列の欠損は null で、`constant` は null を除いた値を文字列にして数える。
 - 欠損率は「行の除外」の後の行で計算する。`use_unlabeled_rows` が false なら、2 つの欠損率は同じになる。
 - `all_null` と `constant` は、目的変数がある行だけで判定する（モデルが学ぶのはこの行だけのため）。
 - 列の除外は CV の前に 1 回だけ行う。時系列の CV でも、欠損率は評価期間を含む全期間で計算する（目的変数を使わないので、ラベルの情報は漏れない）。
@@ -363,7 +363,8 @@ n_repeats = 5
   6. 採用した列の選択（「特徴量選択」）。この後に推定器が続く
 - どの部品も scikit-learn・numpy にあるものだけで組み、mloom のクラスや関数、lambda を入れない（「`model.pkl`」）。
 - クリップの上下限と補完の統計量は、統計量用の行（「処理の流れ」）で先に計算し、固定する。
-- 2〜5 は 1 つの Pipeline（保存する Pipeline の `preprocess` の段。`FrozenEstimator` で固定）にまとめる。段の名前は `infinite`・`clip`・`impute`・`scale` で、使わない段は入れない。
+- 2〜5 は 1 つの Pipeline にまとめ、数値の候補列にだけかける。保存する Pipeline の `preprocess` の段は、`ColumnTransformer([("numeric", この Pipeline, 数値の位置), ("categorical", "passthrough", カテゴリの位置)])` を fit して `FrozenEstimator` で固定したもの（2026-11-27、Issue #21。カテゴリの候補列が無いときも同じ形。`mloom.pipeline.numeric_preprocess` で `"numeric"` を取り出す）。段の名前は `infinite`・`clip`・`impute`・`scale` で、使わない段は入れない。
+- 1 の列の選択では、カテゴリの候補列を整数にする（「カテゴリの列（`lightgbm`）」）。カテゴリの候補列は 2〜5 をかけず、補完もしない。
 
 #### クリップ
 
@@ -425,12 +426,96 @@ n_repeats = 5
 
 - `IterativeImputer` は、作るときは `sklearn.experimental.enable_iterative_imputer` の import が要るが、pickle を読む側では要らない（2026-11-26 scikit-learn 1.9.1 で確認）。
 
+### カテゴリの列（`lightgbm`）
+
+決定事項（2026-11-26 ユーザー判断。2026-11-27 に Issue #21 で実装、`mloom.categorical`）: `model = "lightgbm"` のとき、String・Categorical・Enum の列（`mloom.dtypes.value_kind` が `STRING`）を「カテゴリの候補列」にし、LightGBM のカテゴリ機能で学習・予測・SHAP を行う。銘柄・グレード・号機などの文字列の列をモデルに使うため。
+
+- ほかのモデルは対象にせず、今までどおり `non_numeric` で外す。`ridge`・`pls` は one-hot の列を足しても価値が無い。`random_forest` は scikit-learn にカテゴリ機能が無く（scikit-learn 1.9.1 で、`RandomForest*` にカテゴリの引数が無いことを確認）、ラベルエンコードもターゲットエンコードも決め手が無い。HGB ではなく LightGBM で行うのは、HGB ではカテゴリの列で shap の値が誤るため（Issue #20）。
+- どのモデルで候補にするかは `mloom.models.ModelSpec.handles_categorical` に持つ（`lightgbm` だけ True）。
+- 数値と真偽値の列は「数値の候補列」。カテゴリの候補列にも `all_null`・`constant`・`high_missing` を当てる（「列の除外」）。欠損は null。`constant` は null を除いて値が 1 種類の列（Categorical・Enum は文字列にしてから数える）。欠損率の数え方は数値の列と同じ。
+- 候補列の順は「数値の候補列（データの順）→ カテゴリの候補列（データの順）」（`ColumnPlan.candidates`）。記録の `candidate_columns`・`selected_columns`、推定器への入力、SHAP の列、`model.pkl` の `training_rows.columns` で共通。`ColumnTransformer` の出力が transformer の順に並ぶため。カテゴリの候補列が無いときは今と同じ（データの順）。
+
+エンコード（統計量用の行で fit して固定）:
+
+- 列ごとのカテゴリの一覧は、統計量用の行（「処理の流れ」。最終モデルでは全体）の null でない値を文字列にし、重複を除いて昇順に並べたもの。`OrdinalEncoder(categories=[一覧], handle_unknown="use_encoded_value", unknown_value=np.nan, dtype=np.float64)` を統計量用の行で fit し、`FrozenEstimator` で固定する（`mloom.categorical.fit_encoder`）。数値の列の前処理と同じく、試行ごとには fit し直さない。
+- null と、一覧に無い値（学習に無かった値）は NaN（欠損）になり、LightGBM の欠損の扱いで予測する。予測でエラーにはしない（新しい銘柄などが 1 行あるだけで予測のすべてが止まるのを防ぐため。気付きにくくなることは受け入れる）。
+- カテゴリの数に上限は設けず、少ないカテゴリをまとめる処理もしない（LightGBM には HGB の「255 種類まで」の制限が無いため。HGB の検討では「少ないカテゴリをまとめて使う」と決めていた）。1000 種類（1 種類あたり 2 行）のような列は、試作ではどの扱いでも成績が低かった。外すかどうかは `use:<列名>` の探索と `exclude_columns` に任せる。
+- CV の分割（2026-11-27 実装で決定）: 実行の特徴量の行列（`TrainingData.x`）は、数値の候補列の後ろに、最終モデルのエンコーダで整数にしたカテゴリの候補列を並べる。分割の前処理は、その整数を、分割の統計量用の行にある整数だけを一覧にした `OrdinalEncoder` でもう一度整数にする（`mloom.categorical.fold_encoder`、`mloom.pipeline.fit_fold_preprocess`）。最終モデルの一覧は文字列の昇順なので、これは分割の統計量用の行の文字列で fit したエンコーダと同じ整数になる（`tests/test_pipeline.py` で確認）。分割ごとに文字列の表を持ち回らずに済むため。
+- 分割の統計量用の行で、ある列がすべて null のとき（CV の分割の学習側でだけすべて null になる列など）は、その分割では列の値をすべて NaN として扱い、学習を止めない。`OrdinalEncoder` は空のカテゴリの一覧を受け付けない（scikit-learn 1.9.1 で `transform` が `IndexError`。2026-11-27 に確認）ので、どの整数にも当たらない `-1` だけを一覧にして、すべて NaN にする。
+- クリップ・補完・標準化と、無限大を NaN にする処理は、数値の候補列にだけかける。カテゴリの候補列の欠損は、`[impute] method` に関わらず補完しない（LightGBM は欠損を扱え、欠損であること自体を情報として使えるため）。記録の `preprocessing.clip` は数値の列だけを書く。
+
+保存する Pipeline の形:
+
+1. `columns`: `ColumnTransformer([("numeric", "passthrough", 数値の候補列), ("categorical", FrozenEstimator(OrdinalEncoder), カテゴリの候補列)], remainder="drop")`（`mloom.pipeline.select_columns`）。カテゴリの候補列が無いときは `"numeric"` だけ。`FrozenEstimator` は、Pipeline の fit が transformer を複製しても、fit 済みの一覧を保つため。
+2. `preprocess`: `ColumnTransformer([("numeric", Pipeline(infinite・clip・impute・scale), 数値の位置), ("categorical", "passthrough", カテゴリの位置)])` を fit して固定したもの（「前処理」）。カテゴリの候補列が無いときも同じ形。
+3. `select`: 今と同じく、採用した列の位置で選ぶ。
+4. `model`: 採用した列にカテゴリの列があれば、推定器への入力の中のその位置を `LGBMRegressor`・`LGBMClassifier` の `categorical_column` に渡す（`ModelSpec.build`）。無いときは渡さない。
+   - `categorical_column` は LightGBM の `categorical_feature` の別名。lightgbm 4.7.0 の scikit-learn API は、推定器の引数に `categorical_feature` を渡すと、カテゴリの分割には使うのに「`categorical_feature keyword has been found in params and will be ignored`」と fit のたびに警告する。別名では警告が出ず、同じくカテゴリの分割（`decision_type` が `==`）になった（2026-11-27 に確認。`fit` の引数で渡す方法は、保存した推定器に残らないので使わない）。
+- pickle に `mloom` という文字列が含まれないことは変えない（`tests/test_predict.py`）。
+
+特徴量選択と探索:
+
+- クラスタと順位付け（「特徴量選択」）は、数値の候補列だけで今と同じ方法で行う。カテゴリの候補列はクラスタに入れない（整数にしたカテゴリには、`f_regression`・`f_classif` のスコアにも相関にも意味が無いため）。`k` は 1 〜 数値の候補列のクラスタの数（整数、対数）。
+- カテゴリの候補列ごとに、使うかどうかを Optuna の真偽値で探索する: `trial.suggest_categorical("use:<列名>", [True, False])`。カテゴリの列が多いデータでは探索の範囲が広がるが、受け入れる。
+- 採用する列は、順位の上位 `k` の数値の列と、`use:<列名>` が True のカテゴリの列（並びは候補列の順。`mloom.selection.keep_columns`）。`best_params` に `k` と `use:<列名>` が入り、`best_params.k` は採用した数値の列の数と一致する。
+- モデルの引数を作るときは、`k` と同じく `use:` で始まる名前を除く（`mloom.models.model_params`）。モデルの引数名に `:` は無いので、重ならない。
+- 数値の候補列が 0 のときは、`k` も `use:` も探索せず、カテゴリの候補列をすべて採用する（`k` の範囲 1 〜 0 が作れず、採用する列が 0 の試行を作らないため）。記録の `selection.n_clusters` は 0。
+- カテゴリの候補列が 1 つ以上あるときだけ、`cat_smooth` を 0.1 〜 100（対数。LightGBM の既定の 10 を含む）で探索に足す（「モデル」）。無いときは探索せず、`best_params` にも入らない。ほかのカテゴリ向けのパラメータ（`cat_l2`・`min_data_per_group`・`max_cat_threshold`・`max_cat_to_onehot`）は、試作で成績に効かなかったので探索しない。
+- `lightgbm` 以外のモデルでは何も変わらない。
+
+解釈・SHAP・記録:
+
+- permutation importance では、カテゴリの列は 1 列だけのグループ（クラスタに入らないため）。整数にした値の列を、ほかの列と同じく評価側の行の中で入れ替える。行ごとのエンコードなので、生の値を入れ替えるのと同じになる。
+- `--shap` は、今と同じ `shap.TreeExplainer` で、推定器への入力に対して計算する。カテゴリの列の寄与は `shap_<列名>` に出る。
+- 記録の `preprocessing.categorical` に、最終モデルのカテゴリの候補列ごとに、統計量用の行でのカテゴリの数（null を除く）を残す（`mloom.categorical.describe_categorical`）。カテゴリの候補列が無いときは `{}`。まとめる処理が無いので、まとめたかどうかは残さない。
+
+  ```json
+  "preprocessing": {"clip": {"...": "..."}, "impute": {"method": "none"}, "categorical": {"grade": {"n_categories": 4}, "operator": {"n_categories": 3}}}
+  ```
+
+ベースのモデル（Issue #16・#17 の後に実装したので、この Issue で合わせた。2026-11-27、「ベースのモデル」）:
+
+- `load_base` は、`best_params.k` が無い記録（数値の候補列が無かった実行）も読む。`k` があれば 1 以上の整数、`use:<列名>` は真偽値であることを確かめる。`cat_smooth` があれば、カテゴリの候補列がある探索空間として `check_params` で確かめる（`lightgbm` 以外のモデルなら知らないパラメータになる）。
+- refit のパラメータは、ベースの `best_params` から `k` と `use:` を除いたもの。記録の `best_params` には、モデルの引数と、採用した列を表す `k`（採用した数値の列の数。0 なら入れない）と `use:<列名>`（今回のカテゴリの候補列ごとに採用したか）を入れる。数値の候補列が無ければ、`k` も `use:` も入れない（`mloom.selection.selection_params`）。同じデータの refit では、ベースと同じ `best_params` になる。
+- `optimize --base` で最初の試行に入れるかは、`k`・`use:<列名>`・`cat_smooth` も含めて今回の探索空間と比べる。名前がそろい、値がどれも範囲に入るときだけ入れる（`use:` は `CategoricalDistribution` の選択肢と型まで同じ値）。ベースのカテゴリの列が今回の候補列でない、今回だけにあるカテゴリの候補列がある、ベースに `k` があって今回は数値の候補列が無い、などで名前が違えば入れず、警告する。`k` は今までどおり今回の上限に収める。
+
+スコープ外: `ridge`・`pls`・`random_forest` でのカテゴリの列、one-hot・ターゲットエンコード・頻度エンコード、数値で書かれたカテゴリ（整数のグレード番号など）をカテゴリとして扱う指定、予測時の列の型の検査（学習で文字列だった列に数値が来たときなど）。
+
+2026-11-26 に lightgbm 4.7.0・scikit-learn 1.9.1・shap 0.54.1 の試作で確かめたこと:
+
+- `ColumnTransformer` の中の `OrdinalEncoder` で文字列を整数にし、`LGBMRegressor` にカテゴリの位置を渡す Pipeline は、polars の表で学習・予測できた。カテゴリの分割が使われ（469 回）、pickle に `mloom` は含まれなかった。
+- `OrdinalEncoder` は、カテゴリの一覧を渡さないと polars の null を 1 つのカテゴリとして扱ってしまう。null を除いた一覧を `categories=` に渡し、`handle_unknown="use_encoded_value", unknown_value=np.nan` にすると、null と一覧に無い値が NaN（欠損）になった。
+- LightGBM では、学習に無かった値と null の行の予測が同じ値になり、エラーにならなかった。
+- 学習は String の列で行い、予測で同じ列を Categorical にして渡しても、エンコードの結果は変わらなかった。Enum の列もエンコードできた。
+- カテゴリが 300 種類・1000 種類の列も、まとめずに学習できた。
+- `pred_contrib=True` と shap の `TreeExplainer` の寄与の合計は、予測値と 2e-14 以内で一致した。
+- LightGBM の既定の `cat_smooth=10` は、カテゴリ 1 種類あたりの行が少ないと成績を大きく落とした（評価側の R²、3 seed の平均。数値 1 列とカテゴリ 1 列の人工データで、70% で学習し 30% で評価。300 trees、`learning_rate=0.05`）。
+  - 3000 行・300 種類（1 種類あたり学習 7 行）では、既定値で 0.29、`cat_smooth=1` で 0.91。既定のままだと、整数をただの数値として扱う場合（0.60）より悪い。
+  - `min_data_per_group`・`cat_l2`・`max_cat_threshold`・`min_child_samples` は、1 つずつ緩めても 0.29 のままだった。
+  - 30 種類（1 種類あたり 70 行）では、どの値でもほぼ同じ（0.93）だった。
+
+2026-11-27 にテストで確かめたこと（`tests/test_columns.py`・`tests/test_pipeline.py`・`tests/test_optimize.py`・`tests/test_predict.py`・`tests/test_optimize_base.py`・`tests/test_refit.py`）:
+
+- `lightgbm` では String・Categorical・Enum の列が数値の候補列の後ろに並び、ほかの 3 つのモデルでは `non_numeric` になる。すべて null・null を除いて 1 種類・欠損率が高い文字列の列は、`all_null`・`constant`・`high_missing` で外れる。
+- 数値の列と、目的変数に効く 4 種類の文字列の列のデータで、回帰・2 値分類・3 値分類のどれでも学習・予測でき、`best_params` に `use:<列名>` と `cat_smooth` が入り、最終モデルの木にその列でのカテゴリの分割（`decision_type` が `==`）がある。
+- String・Categorical・Enum のどの型の列でも学習・予測でき、String で学習したモデルに Categorical を渡した予測は、String のときと完全に一致する。
+- 予測時の学習に無かった値と null は、エラーにならず、同じ有限の予測値になる。
+- 300 種類の列も学習でき、`n_categories` は 300。
+- `timeseries` の CV の最初の分割の学習側ですべて null になる列があっても、失敗する試行は無い。
+- 数値の候補列が無いデータでは、`k` も `use:` も無く、カテゴリの候補列のすべてを採用する。
+- カテゴリの列を使うモデルの `--shap` の基準値と寄与の合計は、回帰・2 値分類・3 値分類で、モデルの出力と 1e-6 以内で一致する。
+- カテゴリの列を使うモデルの `model.pkl` を、mloom の import を塞いだ Python で読んで予測でき、pickle に `mloom` という文字列は含まれない。
+- 同じ入力と seed の 2 回の実行で、採用した列と `best_params`（`use:`・`cat_smooth` を含む）が一致する。
+- カテゴリの候補列が無い実行の `best_params` には `use:` と `cat_smooth` が無く、`preprocessing.categorical` は `{}`。
+- カテゴリの列を使うベースは、`optimize --base`（同じデータ・`n_trials = 1`）で最初の試行に入り、`k` の無いベースも入る。カテゴリの候補列が無くなった実行では入らない。同じデータの refit は、ベースと同じ列・`best_params`・予測になる。
+
 ### 特徴量選択
 
 - 相関の高い候補列をクラスタにまとめ、各クラスタの代表 1 列だけを候補にする（下の「相関クラスタ」）。
 - 代表を目的変数との関係でランク付けし（回帰は `f_regression`、分類は `f_classif`）、上位 `k` 列を使う。
 - `k` は HPO で探索するハイパーパラメータの 1 つにする（1 〜 クラスタの数、対数スケール。1 列だけのクラスタも数える）。
-- 最終学習で選ばれた列を「採用した列」として記録の `selected_columns` に残す（候補列の順）。`best_params.k` と数が一致する。
+- クラスタ・ランク付け・`k` は数値の候補列だけのもの。`lightgbm` のカテゴリの候補列は、列ごとに `use:<列名>` で使うかどうかを探索する（2026-11-27、Issue #21。「カテゴリの列（`lightgbm`）」）。
+- 最終学習で選ばれた列を「採用した列」として記録の `selected_columns` に残す（候補列の順）。`best_params.k` と、採用した数値の列の数が一致する。
 - ランク付けの方法（`mutual_info_regression`、モデルの重要度など）は「未決事項」。
 
 相関クラスタ（2026-11-26 ユーザー判断。未決 5。2026-11-26 に Issue #13 で実装、`mloom.selection`）:
@@ -466,6 +551,7 @@ n_repeats = 5
 - CV のどれかの分割で学習や評価に失敗した試行は、警告を標準エラーに出し、失敗として記録して比べない（記録の `hpo.n_trials_failed`）。すべての試行が失敗したら `OptimizationError`（終了コード 1）。
 - 進捗は Optuna のログとして標準エラーに出る。
 - 探索空間はモデルごとに mloom 側で固定する（下の「モデル」）。Skill やユーザーには探索空間を書かせない。
+- 特徴量選択のパラメータとして、`k`（数値の候補列があるとき）と、カテゴリの候補列ごとの `use:<列名>`（`lightgbm` で、数値の候補列があるとき）も探索する（「特徴量選択」「カテゴリの列（`lightgbm`）」）。
 
 ### モデル（案）
 
@@ -476,7 +562,7 @@ n_repeats = 5
 | `ridge` | `Ridge` | `LogisticRegression`（L2） | 補完（既定は中央値）、標準化 | `alpha`: 1e-4 〜 1e3（対数）。分類では `C = 1 / alpha` |
 | `pls` | `PLSRegression`（`scale=False`） | 未対応（指定するとエラー。未決 1） | 補完（既定は中央値）、標準化 | `n_components`: 1 〜 min(20, クラスタの数)（Issue #13 で候補列数から変更）。`k` を超える分は `k` に切り詰める |
 | `random_forest` | `RandomForestRegressor` | `RandomForestClassifier` | 既定は補完しない（「前処理」） | `n_estimators`: 50 〜 300、`max_depth`: 2 〜 32、`min_samples_leaf`: 1 〜 20、`max_features`: 0.1 〜 1.0 |
-| `lightgbm`（2026-11-26 に Issue #20 で実装。`hist_gradient_boosting` を置き換えた） | `LGBMRegressor` | `LGBMClassifier` | 既定は補完しない（「前処理」） | `num_leaves`: 8 〜 256（整数、対数）、`learning_rate`: 1e-3 〜 0.3（対数）、`n_estimators`: 50 〜 1000（整数、対数）、`min_child_samples`: 5 〜 100（整数、対数）、`subsample`: 0.5 〜 1.0、`colsample_bytree`: 0.5 〜 1.0、`reg_lambda`: 1e-8 〜 10（対数）（たたき台の実装の `lightgbm` と同じ範囲） |
+| `lightgbm`（2026-11-26 に Issue #20 で実装。`hist_gradient_boosting` を置き換えた） | `LGBMRegressor` | `LGBMClassifier` | 既定は補完しない（「前処理」） | `num_leaves`: 8 〜 256（整数、対数）、`learning_rate`: 1e-3 〜 0.3（対数）、`n_estimators`: 50 〜 1000（整数、対数）、`min_child_samples`: 5 〜 100（整数、対数）、`subsample`: 0.5 〜 1.0、`colsample_bytree`: 0.5 〜 1.0、`reg_lambda`: 1e-8 〜 10（対数）（たたき台の実装の `lightgbm` と同じ範囲）。カテゴリの候補列があるときだけ `cat_smooth`: 0.1 〜 100（対数）（2026-11-27、Issue #21） |
 
 - 探索範囲の正は `mloom.models`。上の表は 2026-11-26 のたたき台の実装の値。
 - 再現性のため、モデルの `n_jobs` は 1 に固定し、`random_state` に `seed` を渡す。
@@ -587,7 +673,7 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
     "filters": [...],       # 「行のフィルタ」の定義。記録の filters と同じ
     "train_filters": [...], # 学習だけに効くフィルタ。予測では used_for_training の判定にだけ使う
     "training_rows": {      # 学習に使った行の照合用（「予測」）
-        "columns": [...],       # ハッシュにする列（候補列 → 目的変数 → time_column → group_column の順）
+        "columns": [...],       # ハッシュにする列（候補列（数値 → カテゴリ）→ 目的変数 → time_column → group_column の順）
         "target": "quality",    # 目的変数の列名
         "time_column": "timestamp",  # 指定しなければ None
         "group_column": None,        # 指定しなければ None
@@ -666,7 +752,7 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
   - 文字列（String・Categorical・Enum）: `S` と、UTF-8 のバイト列の長さ（uint64、リトルエンディアン）と、バイト列。Categorical・Enum は文字列にしてから作る。分類の目的変数やグループの列が Categorical のことがあるため。
   - Datetime: `T` と、マイクロ秒の整数（int64、リトルエンディアン）。タイムゾーン付きの列は UTC の値、タイムゾーンが無い列はその値をそのまま整数にする。時間の単位（ns、us、ms）が違っても同じになる。
   - Date: `D` と、1970-01-01 からの日数（int64、リトルエンディアン）。
-- ほかの型（Duration、Time、List、Binary など）の列はハッシュにできない。目的変数・`time_column`・`group_column` がそうなら、学習を始める前に `InputError`（終了コード 2）で止める（候補列は数値か真偽値だけなので当たらない）。
+- ほかの型（Duration、Time、List、Binary など）の列はハッシュにできない。目的変数・`time_column`・`group_column` がそうなら、学習を始める前に `InputError`（終了コード 2）で止める。候補列は数値・真偽値か、`lightgbm` のカテゴリの候補列（String・Categorical・Enum）だけなので当たらない（2026-11-27、Issue #21）。
 - 固定した小さな表のハッシュの値を、テスト（`tests/test_row_hash.py`）で固定している。正規形を変えると、それまでに保存した `model.pkl` と照合できなくなる。
 
 SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実装、`mloom.explain`）:
@@ -674,7 +760,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
 - `--shap` を付けたときだけ出す。計算に時間がかかることがあり、列も説明変数の数だけ増えるため。
 - shap パッケージを、mloom の通常の依存にする。使うのは `mloom predict` の側だけで、`model.pkl` の依存は増えない。
 - `lightgbm`・`random_forest` は `shap.TreeExplainer`、`ridge`・`pls` は線形の SHAP（特徴量の独立を仮定）で計算する。どのモデルかは、推定器のクラスで決める（`LGBMRegressor`・`LGBMClassifier`・`RandomForest*` なら木、ほかは線形）。
-- 寄与は、推定器への入力（前処理と、採用した列の選択の後の値）に対して計算し、採用した列の名前で出す。標準化するモデルでは、標準化した値の単位の寄与になる（合計は同じ）。
+- 寄与は、推定器への入力（前処理と、採用した列の選択の後の値）に対して計算し、採用した列の名前で出す。標準化するモデルでは、標準化した値の単位の寄与になる（合計は同じ）。`lightgbm` のカテゴリの列は整数にした値に対する寄与で、`shap_<列名>` に出る（2026-11-27、Issue #21。合計がモデルの出力と 1e-6 以内で一致することをテストで確かめた）。
 - 線形の SHAP（2026-11-26 実装で決定）: 列 j の寄与は w_j ×（x_j − 基準_j）、基準値は基準の点での出力。基準は `model.pkl` の `shap_background`。重み w は、基準の点と、基準から列ごとに 1 だけ動かした点での、出力の差で求める。出力は入力の 1 次式なので、差は係数と一致する。推定器の係数の持ち方（`PLSRegression` は内部で入力を中心化し、`intercept_` は中心化した後の切片）に依らないため。出力は、回帰は `predict`、分類（`LogisticRegression`）は `decision_function`。
 - shap は `import` を `--shap` のときの計算の中だけで行う（2026-11-26 実装。`--shap` なしでは import しないことをテストで確認）。
 - 2 値分類は `classes_[1]` に対する値だけを出す（列が 2 倍に増えるのを防ぐため。もう一方のクラスは符号が逆になるだけ）。
@@ -745,7 +831,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   - `exclude_columns` は、記録の一番上に足した `exclude_columns`（`Config.exclude_columns` そのまま）から読む（2026-11-26、Issue #16 の実装で決定）。Issue の当初案は `excluded_columns` のうち `reason` が `user_excluded` の列だったが、そこには、データに無い列と、目的変数・`time_column`・`group_column` を兼ねる列が残らない（`mloom.columns.name_reason` は目的変数と役割の列を先に判定し、`plan_columns` はデータにある列だけを見る）。ベースのデータに無かった列が新しいデータに現れると、ユーザーが外した列なのに候補列になってしまうため、指定したとおりの値を残す。
 - 設定の値: 記録の `settings` の表ごとの値を、`mloom.toml` と同じ検査で読む（`mloom.settings.settings_from_record`）。`sources` はどのキーもベースの `model.pkl` のパス、`files` は `[{"role": "base", "path": "<ベースの model.pkl のパス>", "found": true}]`。記録の `sources`・`files` と、mloom が知らないキーは読まない。
 - 必要なキー: 上の表のキーの全部（`hpo` が `null` なら `hpo.n_trials`・`hpo.timeout` は要らない）、`selected_columns`・`best_params`、refit が記録に写す `created_at`・`cv_scores`、設定のすべての表とキー。無い、型や値が違うときは `InputError`（終了コード 2）。メッセージに、足りない（または不正な）キーと、記録を作った版（`mloom_version`）を入れ、`mloom optimize` で作り直すよう案内する。
-  - `best_params` は、`k` が 1 以上の整数で、`k` 以外がそのモデルの探索空間で出しうる値であること（パラメータがそろい、知らないパラメータが無く、型と範囲が合う。`ModelSpec.check_params`。Optuna の `FixedTrial` で探索空間の `suggest` を通し、範囲外の警告もエラーにする）を確かめる。PLS の `n_components` の上限のうち候補列の数で決まる部分は確かめない（`build_pipeline` が切り詰める）。欠けたパラメータを推定器の既定値で補って、ベースと違う作り方で学習してしまわないため（2026-11-26、PR #26 のレビューで決定）。
+  - `best_params` は、`k` が（あれば）1 以上の整数で、`use:<列名>` が真偽値で、それ以外がそのモデルの探索空間で出しうる値であること（パラメータがそろい、知らないパラメータが無く、型と範囲が合う。`ModelSpec.check_params`。Optuna の `FixedTrial` で探索空間の `suggest` を通し、範囲外の警告もエラーにする）を確かめる。PLS の `n_components` の上限のうち候補列の数で決まる部分は確かめない（`build_pipeline` が切り詰める）。欠けたパラメータを推定器の既定値で補って、ベースと違う作り方で学習してしまわないため（2026-11-26、PR #26 のレビューで決定）。
   - 古い形式を読み替える処理は作らない（`AGENTS.md`）。版が違っても、必要なキーがそろっていて値が正しければ読む。記録の形式が変わる更新の後は、古いベースが使えず作り直しになるが、受け入れる（ユーザー判断）。
 
 refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の流れのうち、探索を除いたもの:
@@ -755,9 +841,9 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
    - 設定は、`settings` が `None` ならベースの記録の値、パスなら `optimize` と同じ順（そのファイル → mloom の既定値）で読む（同じ作り方で再現するため）。
 2. 採用する列: ベースの `selected_columns` のうち、今回の候補列にあるもの（ベースの順）。無い列は外し、理由（今回の `excluded_columns` の `reason`。データに列が無ければ `not_in_data`）を記録の `base.dropped_columns` に残し、1 列ずつ `warnings.warn` で警告する（ユーザー判断。運用を止めないため。採用する列が減ると振る舞いが変わるので、Skill が必ず伝える）。
    - 1 列も残らなければ `InputError`（終了コード 2）。メッセージに外した列と理由を入れ、`mloom optimize` で作り直すよう案内する。候補列そのものが 1 列も残らないとき（ベースが採用しなかった列も含めて）も同じメッセージにする。そのため、候補列が空かどうかの検査は `plan_columns` から `require_candidates` に分け、`prepare_training` が受け取る検査（`optimize` は `require_candidates`、refit は採用する列の検査）を列の除外の直後に呼ぶ（2026-11-26、PR #26 のレビューで決定）。
-3. パラメータ: ベースの `best_params` から `k` を除いて固定する。`pls` の `n_components` は、`build_pipeline` が採用する列の数で切り詰める（記録の `best_params.n_components` はベースの値のまま）。
+3. パラメータ: ベースの `best_params` から `k` と `use:<列名>` を除いて固定する（`use:` は 2026-11-27、Issue #21）。`pls` の `n_components` は、`build_pipeline` が採用する列の数で切り詰める（記録の `best_params.n_components` はベースの値のまま）。
 4. CV のスコア: 分割ごとに、`optimize_model` と同じ行（学習側の目的変数がある行と、学習側の目的変数が欠損した行）で前処理を fit し、固定した列とパラメータで学習側を学習して評価側を評価する（`metric.report_value`）。Optuna の study は作らない。分割の学習の失敗は、`optimize` の試行の失敗と違い、そのままエラーにする（終了コード 1）。
-5. 最終学習と記録の組み立ては `optimize_model` と同じ（`mloom.training.fit_final`）。`best_params.k` は採用する列の数。permutation importance のグループは採用した列 1 列ずつ（クラスタで代表を選ばないため）。
+5. 最終学習と記録の組み立ては `optimize_model` と同じ（`mloom.training.fit_final`）。`best_params.k` は採用する数値の列の数（「カテゴリの列（`lightgbm`）」）。permutation importance のグループは採用した列 1 列ずつ（クラスタで代表を選ばないため）。
 
 - refit の `cv_scores` は、ベースの `cv_scores` と一致しなくてよい。ベースは分割ごとに列を選び直したスコアで、refit はすべての分割で同じ列を使うため（同じ入力で 2 回 refit すると完全に一致する）。列とパラメータはベースのデータで選んだもので、新しいデータの評価側の行と重なることがあるので、スコアは楽観的になりうる（受け入れる。探索しなくても、新しいデータでの目安があると判断しやすいため。Skill が伝え、学習期間の後のデータで `mloom predict` を使って確かめるよう勧める）。
 - 同じデータで refit すると、ベースと同じ列・パラメータで学習され、同じ予測になる（2026-11-26、全モデル・タスクで `tests/test_refit.py` で確かめた）。
@@ -774,10 +860,10 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
    - ベースの目的変数・`time_column`・`group_column` は `exclude_columns` に入っていないので、`--target`・`--time-column`・`--group-column` を変えると、ベースでそれだった列が候補列になりうる（2026-11-26、Issue #17 の実装で受け入れた。`exclude_columns` は指定したとおりの値を引き継ぐ（「ベースの読み込み」）ので、ユーザーが外した列は候補列にならない。外したいときは `--exclude-columns` で明示する。Skill が伝える）。
 2. 最初の試行: `config.model` がベースのモデルと同じときだけ、ベースの `best_params` を `study.enqueue_trial` で最初の試行に入れる。入れた試行も、ほかの試行と同じく比べられ、最良なら採用される（同じデータ・同じ引数なら、ベースより悪くならない）。
    - `k` は、今回の `k` の上限（クラスタの数。Issue #13）以下に収める（ベースの `k` が 1 以上であることは `load_base` が確かめている）。
-   - ほかのパラメータは、今回の探索範囲に入っているかを確かめる。範囲は、使い捨ての `optuna.create_study().ask()` の試行に `model_spec.suggest(trial, クラスタの数)` を呼び、その `distributions` から得る。パラメータの名前が一致し、値がどれも `low` 以上 `high` 以下（`step` があればその刻みにも乗る）のときだけ入れる。入らなければ入れず、`warnings.warn` で警告する（CLI は `warning:` の 1 行）。`load_base` が探索空間に合うかを確かめているので、範囲の外になるのは、候補列の数で決まる上限（`pls` の `n_components`）が今回のほうが小さいときなど。
+   - ほかのパラメータは、今回の探索範囲に入っているかを確かめる。範囲は、使い捨ての `optuna.create_study().ask()` の試行に、探索と同じ `suggest`（モデルのパラメータと、`k`・`use:<列名>`）を呼び、その `distributions` から得る（`k`・`use:`・`cat_smooth` を含めたのは 2026-11-27、Issue #21。「カテゴリの列（`lightgbm`）」）。パラメータの名前が一致し、値がどれも `low` 以上 `high` 以下（`step` があればその刻みにも乗る）のときだけ入れる。入らなければ入れず、`warnings.warn` で警告する（CLI は `warning:` の 1 行）。`load_base` が探索空間に合うかを確かめているので、範囲の外になるのは、候補列の数で決まる上限（`pls` の `n_components`）が今回のほうが小さいときなど。
 3. ベースの評価（探索の前に行う。エラーが長い探索の後にならないように）:
    - 評価する条件: `config.target`・`config.task`・`config.metric_name` がベースと同じとき。違えば評価せず、`not_compared` に違ったもの（`"target"`・`"task"`・`"metric"`）を入れる（目的変数などが違うと、スコアの意味が変わるため）。モデルを変えていても評価する（同じ分割での評価なので、モデルどうしの比較にもなる）。
-   - ベースの作り方: ベースのモデル・`best_params`（`k` を除く）・`seed`、ベースの `selected_columns` のうち今回の候補列にあるもの、ベースの設定の値での前処理（`plan_preprocessing(base.config, base.settings)`）。
+   - ベースの作り方: ベースのモデル・`best_params`（`k` と `use:<列名>` を除く）・`seed`、ベースの `selected_columns` のうち今回の候補列にあるもの、ベースの設定の値での前処理（`plan_preprocessing(base.config, base.settings)`）。
    - 今回の候補列に無い列は外し、refit と同じく理由を `base.dropped_columns` に残して 1 列ずつ警告する（`mloom.base.base_columns`・`warn_dropped`）。1 列も残らなければ評価せず、`not_compared` に `"columns"` を入れる（探索は続け、終了コード 0）。
    - 評価の方法: 今回の CV の分割のそれぞれで、前処理を今回の探索と同じ行で fit し、ベースの作り方を学習側で学習して評価側を評価する（`metric.report_value`）。refit の CV のスコアと同じ関数（`mloom.fixed_cv`）を使い、分割の学習の失敗はそのままエラーにする。
    - 差（`comparison`）: 分割ごとに、今回の最良の試行のその分割のスコアとベースの作り方のスコアの差をとる。最小化する指標なら「ベース − 今回」、最大化する指標なら「今回 − ベース」で、正なら今回の方が良い（Skill が向きを取り違えないように揃える）。`folds`・`mean`・`std`（母標準偏差）を残す。
@@ -804,6 +890,8 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
 
 - `preprocessing.impute` に、最終モデルが実際に使った補完の方式（`auto` を読み替えた後の値）を足した（2026-11-26、Issue #12。「前処理」）。
 
+- `preprocessing.categorical` に、カテゴリの候補列ごとのカテゴリの数を足した。`best_params` に `use:<列名>` と `cat_smooth` が入りうる。数値の候補列が無い実行では `best_params.k` が無い（2026-11-27、Issue #21。「カテゴリの列（`lightgbm`）」）。
+
 - 一番上の `selection`（`selected_columns` の直前）と、`settings.selection` を足した（2026-11-26、Issue #13。「特徴量選択」）。`selection.n_clusters` はクラスタの数（1 列だけのクラスタも数える）。`selection.clusters` は 2 列以上のクラスタだけを候補列の順に並べ、`representative` は最終モデルでそのクラスタの代表になった列、`selected` はそれが `selected_columns` に入っているか。
 
 - 一番上の `base`（`mloom_version` の直後）と `exclude_columns`（`seed` の直後。`Config.exclude_columns` のとおり）を足した（2026-11-26、Issue #16。「ベースのモデル」）。
@@ -821,7 +909,7 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
     ```
 
   - `path` は渡した `model.pkl` のパス（渡したとおりの文字列）。`created_at`・`mloom_version`・`cv_scores` はベースの記録の値をそのまま写す。`cv_scores` はベースを作ったときのデータと分割でのスコアで、今回の `cv_scores` とはデータが違うので、そのまま比べられない。`dropped_columns` は、使えなくなって外した列と理由（外さなければ空）。
-  - refit の `interpretation.permutation_importance` のグループは、採用した列 1 列ずつ（`columns` はその列だけ）。`best_params.k` は採用した列の数。
+  - refit の `interpretation.permutation_importance` のグループは、採用した列 1 列ずつ（`columns` はその列だけ）。`best_params.k` は採用した数値の列の数で、カテゴリの候補列があれば `use:<列名>` も入る（「カテゴリの列（`lightgbm`）」）。
   - `optimize --base` の記録では、`base` は次の形（2026-11-26、Issue #17。「ベースからの最適化」）。`hpo` と `selection` はベースの無い `optimize` と同じ。
 
     ```json
@@ -898,7 +986,8 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
   },
   "preprocessing": {
     "clip": {"method": "iqr", "bounds": {"TI-102": [-3.1, 3.2]}, "unclipped_columns": ["PI-900"]},
-    "impute": {"method": "median"}
+    "impute": {"method": "median"},
+    "categorical": {}
   },
   "excluded_columns": [
     {"name": "timestamp", "reason": "role", "detail": null},
@@ -1160,16 +1249,17 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.errors` | 例外（`InputError` は終了コード 2、それ以外は 1） |
 | `mloom.config` | `Config` の定義と、データが要らない検査 |
 | `mloom.metrics` | 評価指標と、タスクごとに選べる指標 |
-| `mloom.models` | モデルのレジストリ（推定器、標準化の要否、欠損を扱えるかと `auto` の補完、探索空間と、パラメータがそれに合うかの検査（`check_params`）、特徴量選択の列の数のパラメータ名 `K_PARAM`） |
+| `mloom.models` | モデルのレジストリ（推定器、標準化の要否、欠損を扱えるかと `auto` の補完、カテゴリの列を扱えるか、探索空間と、パラメータがそれに合うかの検査（`check_params`）、特徴量選択のパラメータ名 `K_PARAM`・`use:<列名>` と、それを除いたモデルの引数（`model_params`）） |
 | `mloom.data` | データの読み込み |
 | `mloom.sensors` | `unavailable-sensors.json` の読み込み |
 | `mloom.settings` | 設定ファイル（`mloom.toml`）とその既定値の読み込みと、ベースの記録の設定の値の読み込み（`settings_from_record`） |
 | `mloom.rows` | 学習に使う行の選択（目的変数の欠損と無限大）と、列ごとの無限大の行数 |
-| `mloom.columns` | 列の除外と理由の記録 |
+| `mloom.columns` | 列の除外と理由の記録。残った列を数値とカテゴリの候補列に分ける |
+| `mloom.categorical` | カテゴリの候補列の整数へのエンコード（最終モデルのエンコーダ、CV の分割のエンコーダ）と、記録の `preprocessing.categorical`。2026-11-27、Issue #21 |
 | `mloom.cv` | ユーザーが指定した CV の分割 |
-| `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選ぶ。前処理の方式の決定と fit、採用した列の選択）と、保存した Pipeline の候補列・採用した列・推定器への入力の取り出し |
+| `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選び、カテゴリの列を整数にする。前処理の方式の決定と fit、採用した列の選択、推定器へのカテゴリの列の位置）と、保存した Pipeline の候補列・採用した列・推定器への入力の取り出し |
 | `mloom.clip` | クリップの上下限の計算と、記録の `preprocessing.clip` |
-| `mloom.selection` | 特徴量選択：相関の高い列のクラスタ（CV の前に 1 回）と、その代表のランク付け（Pipeline の外で、分割ごとに 1 回）、記録の `selection` |
+| `mloom.selection` | 特徴量選択：数値の候補列の、相関の高い列のクラスタ（CV の前に 1 回）と、その代表のランク付け（Pipeline の外で、分割ごとに 1 回）、`k` と `use:<列名>` から採用する列（`keep_columns`）とその逆（`selection_params`）、記録の `selection` |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
 | `mloom.refit` | `refit_model`：ベースの列とパラメータを固定した、探索しない再学習 |
 | `mloom.base` | ベースの `model.pkl` を新しい実行から見たもの：記録の読み込み（`load_base`）、ベースの採用した列のうち今回の候補列にあるものと外した列の理由（`base_columns`・`warn_dropped`）、記録の `base` の共通のキー（`describe_base`）、ベースを上書きしない確認（`check_output`） |
@@ -1197,7 +1287,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | 4 | `timeseries` の時刻の列 | `time_column` を必須にする。行の並び順を時刻順とみなす指定も許すか |
 | 5 | 特徴量選択の方法 | **決定**（2026-11-26）: `f_regression`・`f_classif` のランクの上位 `k` 列（`k` を HPO で探索）に、相関クラスタリングで似た列をまとめ、各クラスタの代表だけを候補にする間引きを足す。→「特徴量選択」 |
 | 6 | `unavailable-sensors.json` の形式と照合 | `{"sensors": [{"name", "reason"}]}`、列名の完全一致。接頭辞やパターンでの照合が要るか |
-| 7 | 数値でない列の扱い | 除外する（エンコードしない） |
+| 7 | 数値でない列の扱い | **決定**（2026-11-26 ユーザー判断。2026-11-27 に Issue #21 で実装）: `lightgbm` では String・Categorical・Enum の列を `OrdinalEncoder` で整数にし、LightGBM のカテゴリの列として使う。ほかのモデルでは除外する（`non_numeric`）。→「カテゴリの列（`lightgbm`）」 |
 | 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`lightgbm`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |
 | 9 | 選べるモデル | 表の 4 つで始める。API から任意の推定器と探索空間を渡せるようにするか |
 | 10 | 予測の入口 | **決定**（2026-11-26）: `mloom predict` の CLI と Python API を用意する。`pickle.load` だけでも予測できるようにする。→「予測」 |
