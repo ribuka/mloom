@@ -483,6 +483,19 @@ def test_only_categorical_candidates_are_all_used_without_k(
     assert result.to_dict()["selection"]["n_clusters"] == 0
 
 
+@pytest.mark.parametrize("clip", ["quantile", "iqr", "mad", "sigma"])
+def test_only_categorical_candidates_train_with_any_clipping_and_imputation(
+    graded: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, clip: str
+) -> None:
+    """Without a numeric candidate, every clipping and an imputation leave the categorical columns to the model."""
+    settings = _settings(tmp_path, f"[clip]\nmethod = '{clip}'\n[impute]\nmethod = 'knn'\n")
+    config = make_config(model="lightgbm", exclude_columns=("t", "x1", "y", "c2", "c3"), settings=settings)
+    result = optimize_model(graded, config)
+    assert result.selected_columns == ["grade", "shift"]
+    assert result.to_dict()["preprocessing"]["clip"] == {"method": clip, "bounds": {}, "unclipped_columns": []}
+    assert np.isfinite(result.pipeline.predict(graded)).all()
+
+
 def test_same_seed_gives_same_result_with_categorical_columns(
     graded: pl.DataFrame, make_config: Callable[..., Config]
 ) -> None:

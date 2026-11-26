@@ -443,6 +443,7 @@ n_repeats = 5
 - CV の分割（2026-11-27 実装で決定）: 実行の特徴量の行列（`TrainingData.x`）は、数値の候補列の後ろに、最終モデルのエンコーダで整数にしたカテゴリの候補列を並べる。分割の前処理は、その整数を、分割の統計量用の行にある整数だけを一覧にした `OrdinalEncoder` でもう一度整数にする（`mloom.categorical.fold_encoder`、`mloom.pipeline.fit_fold_preprocess`）。最終モデルの一覧は文字列の昇順なので、これは分割の統計量用の行の文字列で fit したエンコーダと同じ整数になる（`tests/test_pipeline.py` で確認）。分割ごとに文字列の表を持ち回らずに済むため。
 - 分割の統計量用の行で、ある列がすべて null のとき（CV の分割の学習側でだけすべて null になる列など）は、その分割では列の値をすべて NaN として扱い、学習を止めない。`OrdinalEncoder` は空のカテゴリの一覧を受け付けない（scikit-learn 1.9.1 で `transform` が `IndexError`。2026-11-27 に確認）ので、どの整数にも当たらない `-1` だけを一覧にして、すべて NaN にする。
 - クリップ・補完・標準化と、無限大を NaN にする処理は、数値の候補列にだけかける。カテゴリの候補列の欠損は、`[impute] method` に関わらず補完しない（LightGBM は欠損を扱え、欠損であること自体を情報として使えるため）。記録の `preprocessing.clip` は数値の列だけを書く。
+- 数値の候補列が 0 のときも、`[clip]`・`[impute]` の設定に関わらず学習できる。クリップの上下限は空（`mloom.clip.clip_bounds`）で、`preprocessing.clip` の `bounds`・`unclipped_columns` は空になる（PR #28 のレビューで、`iqr` などで分位点の計算が止まることを見つけて直した。2026-11-27）。
 
 保存する Pipeline の形:
 
