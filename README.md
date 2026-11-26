@@ -95,7 +95,7 @@ uv run mloom show outputs/quality-lgbm/model.pkl
 | `[clip]` | 既定 `none`（切らない） | `quantile`、`iqr`、`mad`、`sigma`。上下限は欠損と無限大を除いて計算し、ばらつきが 0 の列は切りません |
 | `[impute]` | 既定 `auto` | `none`、`median`、`mean`、`most_frequent`、`constant`、`knn`、`iterative`。`auto` は `ridge`・`pls` では `median`、`lightgbm`・`random_forest` では `none`（欠損のまま学習）です。`none` を `ridge`・`pls` で選ぶと終了コード 2 で止まります |
 
-- 使った値は記録の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。
+- 使った値は記録の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。実際に使った補完の方式（`auto` を読み替えた後の値）は `preprocessing.impute.method` に残ります（`settings.impute.method` は設定に書いた値のまま）。
 
 ## Python API
 

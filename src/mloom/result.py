@@ -86,6 +86,9 @@ class Result:
         The settings that were used.
     clip : dict[str, Any]
         The clipping of the fitted pipeline (``mloom.clip.describe_clip``).
+    impute : dict[str, Any]
+        The imputation of the fitted pipeline: ``{"method": <method>}``, with
+        ``"auto"`` resolved for the model (``Preprocessing.impute``).
     columns : ColumnPlan
         The candidate and excluded columns.
     selected_columns : list[str]
@@ -119,6 +122,7 @@ class Result:
     sensors: UnavailableSensors
     settings: Settings
     clip: dict[str, Any]
+    impute: dict[str, Any]
     columns: ColumnPlan
     selected_columns: list[str]
     best_params: dict[str, Any]
@@ -158,7 +162,7 @@ class Result:
                 "not_in_data": self.columns.sensors_not_in_data,
             },
             "settings": self.settings.to_dict(),
-            "preprocessing": {"clip": self.clip},
+            "preprocessing": {"clip": self.clip, "impute": self.impute},
             "excluded_columns": [vars(column) for column in self.columns.excluded],
             "candidate_columns": self.columns.candidates,
             "selected_columns": self.selected_columns,
