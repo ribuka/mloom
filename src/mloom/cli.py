@@ -13,10 +13,14 @@ import json
 import sys
 import traceback
 import warnings
+from collections.abc import Generator
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import mloom
-from mloom.base import check_output, load_base
+from mloom.base import Base, check_output, load_base
 from mloom.config import (
     CV_METHODS,
     DEFAULT_SETTINGS,
@@ -38,6 +42,8 @@ from mloom.result import Result
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INPUT = 2
+# Arguments of optimize that --base can do without: those of the base are used.
+_REQUIRED_WITHOUT_BASE = ("target", "task", "model", "cv")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,30 +59,36 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     optimize = commands.add_parser("optimize", help="select features, tune a model, and save model.pkl")
     optimize.add_argument("data", type=Path, help="Parquet file")
-    optimize.add_argument("--target", required=True, help="target column")
-    optimize.add_argument("--task", required=True, choices=TASKS)
-    optimize.add_argument("--model", required=True, choices=tuple(MODELS))
-    optimize.add_argument("--cv", required=True, choices=CV_METHODS)
-    optimize.add_argument("--output", required=True, type=Path, help="directory for model.pkl")
-    optimize.add_argument("--n-splits", type=int, default=5)
+    optimize.add_argument(
+        "--base",
+        type=Path,
+        help="model.pkl to start from: its arguments are used unless given, and it is scored on the same CV folds",
+    )
+    optimize.add_argument("--target", help="target column (required without --base)")
+    optimize.add_argument("--task", choices=TASKS, help="required without --base")
+    optimize.add_argument("--model", choices=tuple(MODELS), help="required without --base")
+    optimize.add_argument("--cv", choices=CV_METHODS, help="required without --base")
+    optimize.add_argument("--output", required=True, type=Path, help="directory for model.pkl; not that of --base")
+    optimize.add_argument("--n-splits", type=int, help="default: 5")
     optimize.add_argument("--time-column", help="required with --cv timeseries")
     optimize.add_argument("--group-column", help="required with --cv group")
     metrics = sorted({name for task_metrics in METRICS.values() for name in task_metrics})
     optimize.add_argument("--metric", choices=metrics, help="default: rmse (regression), log_loss (classification)")
-    optimize.add_argument("--exclude-columns", nargs="*", default=[], metavar="COLUMN")
+    optimize.add_argument(
+        "--exclude-columns", nargs="*", metavar="COLUMN", help="with --base, replaces the columns the base excluded"
+    )
     _add_sensors_and_filters(optimize)
     optimize.add_argument(
         "--settings",
         type=Path,
-        default=DEFAULT_SETTINGS,
         help=(
-            f"project settings such as max_missing_rate (default: {DEFAULT_SETTINGS}); "
-            "keys it does not set come from the defaults of mloom"
+            f"project settings such as max_missing_rate (default: {DEFAULT_SETTINGS}, "
+            "or with --base the settings recorded in it); keys it does not set come from the defaults of mloom"
         ),
     )
-    optimize.add_argument("--n-trials", type=int, default=100)
+    optimize.add_argument("--n-trials", type=int, help="default: 100")
     optimize.add_argument("--timeout", type=float, help="seconds")
-    optimize.add_argument("--seed", type=int, default=0)
+    optimize.add_argument("--seed", type=int, help="default: 0")
     refit = commands.add_parser(
         "refit", help="fit the columns and parameters of a base model.pkl on new data, without a search"
     )
@@ -122,13 +134,18 @@ def _add_sensors_and_filters(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def to_config(args: argparse.Namespace) -> Config:
+def to_config(args: argparse.Namespace, base: Base | None = None) -> Config:
     """Turn the parsed arguments of ``optimize`` into a config.
 
     Parameters
     ----------
     args : argparse.Namespace
-        Parsed arguments.
+        Parsed arguments; an argument not given is ``None``.
+    base : Base | None
+        The base of ``--base``. When given, the config starts from its config
+        (``dataclasses.replace(base.config, ...)``) and the arguments given
+        replace its values; ``--filters`` replaces both ``filters`` and
+        ``train_filters``. Otherwise the defaults of ``Config`` are used.
 
     Returns
     -------
@@ -138,28 +155,35 @@ def to_config(args: argparse.Namespace) -> Config:
     Raises
     ------
     InputError
-        When the arguments do not make a valid config, or the filters file
-        is invalid.
+        When ``--target``, ``--task``, ``--model`` or ``--cv`` is missing
+        without a base, the arguments do not make a valid config, or the
+        filters file is invalid.
     """
-    filters, train_filters = load_filters(args.filters) if args.filters is not None else ((), ())
-    return Config(
-        target=args.target,
-        task=args.task,
-        model=args.model,
-        cv=args.cv,
-        n_splits=args.n_splits,
-        time_column=args.time_column,
-        group_column=args.group_column,
-        metric=args.metric,
-        exclude_columns=tuple(args.exclude_columns),
-        filters=filters,
-        train_filters=train_filters,
-        unavailable_sensors=args.unavailable_sensors,
-        settings=args.settings,
-        n_trials=args.n_trials,
-        timeout=args.timeout,
-        seed=args.seed,
-    )
+    given: dict[str, Any] = {
+        "target": args.target,
+        "task": args.task,
+        "model": args.model,
+        "cv": args.cv,
+        "n_splits": args.n_splits,
+        "time_column": args.time_column,
+        "group_column": args.group_column,
+        "metric": args.metric,
+        "exclude_columns": None if args.exclude_columns is None else tuple(args.exclude_columns),
+        "unavailable_sensors": args.unavailable_sensors,
+        "settings": args.settings,
+        "n_trials": args.n_trials,
+        "timeout": args.timeout,
+        "seed": args.seed,
+    }
+    if args.filters is not None:
+        given["filters"], given["train_filters"] = load_filters(args.filters)
+    values = {name: value for name, value in given.items() if value is not None}
+    if base is not None:
+        return replace(base.config, **values)
+    missing = [f"--{name}" for name in _REQUIRED_WITHOUT_BASE if name not in values]
+    if missing:
+        raise InputError(f"optimize needs {', '.join(missing)} without --base")
+    return Config(**values)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -190,7 +214,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _optimize(args: argparse.Namespace) -> Path:
-    result = optimize_model(args.data, to_config(args))
+    base = None
+    if args.base is not None:
+        base = load_base(args.base)
+        check_output(args.output, args.base)
+    config = to_config(args, base)
+    with _warning_lines():
+        result = optimize_model(args.data, config, base=base)
     model_path = result.save(args.output)
     _print_summary(result)
     return model_path
@@ -200,7 +230,7 @@ def _refit(args: argparse.Namespace) -> Path:
     base = load_base(args.base)
     check_output(args.output, args.base)
     filters, train_filters = load_filters(args.filters) if args.filters is not None else (None, None)
-    with warnings.catch_warnings(record=True) as caught:
+    with _warning_lines():
         result = refit_model(
             args.data,
             base,
@@ -209,11 +239,20 @@ def _refit(args: argparse.Namespace) -> Path:
             unavailable_sensors=args.unavailable_sensors,
             settings=args.settings,
         )
-    for warning in caught:
-        print(f"warning: {warning.message}", file=sys.stderr)
     model_path = result.save(args.output)
     _print_summary(result)
     return model_path
+
+
+@contextmanager
+def _warning_lines() -> Generator[None]:
+    # Each warning of the run is printed to stderr as one "warning:" line, also when the run fails.
+    with warnings.catch_warnings(record=True) as caught:
+        try:
+            yield
+        finally:
+            for warning in caught:
+                print(f"warning: {warning.message}", file=sys.stderr)
 
 
 def _predict(args: argparse.Namespace) -> Path:

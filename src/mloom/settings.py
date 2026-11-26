@@ -14,8 +14,9 @@ A key is named by its table and its name (``[clip] method`` and ``[impute]
 method`` are different keys). An unknown table or key, or an invalid value, is
 an error in every file, so that a typo does not silently keep the default.
 
-``mloom refit`` reads instead the settings recorded in its base ``model.pkl``
-(``settings_from_record``; see "ベースのモデル" in ``docs/spec.md``).
+``mloom refit`` and ``mloom optimize --base`` read instead the settings
+recorded in the base ``model.pkl`` (``settings_from_record``; see "ベースのモデル"
+in ``docs/spec.md``).
 """
 
 import math
@@ -291,13 +292,15 @@ def mloom_config_dir() -> Path | None:
     return None
 
 
-def load_settings(path: Path | None) -> Settings:
+def load_settings(path: Path | Settings | None) -> Settings:
     """Read the settings from the project file and the defaults of mloom.
 
     Parameters
     ----------
-    path : Path | None
+    path : Path | Settings | None
         The project file. ``None`` reads only the defaults of mloom.
+        ``Settings`` (those of a base, for example) are returned as they are,
+        without reading any file.
 
     Returns
     -------
@@ -313,6 +316,8 @@ def load_settings(path: Path | None) -> Settings:
     MloomError
         When the defaults of mloom are missing or do not set every key.
     """
+    if isinstance(path, Settings):
+        return path
     config_dir = mloom_config_dir()
     layers: list[tuple[str, Path | Traversable | None]] = [
         ("project", path),

@@ -80,6 +80,25 @@ uv run mloom refit data/sample.parquet --base outputs/quality-lgbm/model.pkl --o
 - 記録の `base` に、ベースのパスと、ベースを作ったときの `cv_scores` などが残ります。`base.cv_scores` はベースを作ったときのデータでのスコアなので、今回の `cv_scores` とそのまま比べられません。また今回の `cv_scores` は、ベースのデータで選んだ列とパラメータで計算するので、楽観的になりえます。学習期間の後のデータで `mloom predict` のスコア（下の「予測」）を確かめてください。
 - 記録の `hpo` と `selection` は `null` です。`model.pkl` は `optimize` のものと同じく、`mloom predict`・`mloom show`・`pickle.load` で使えます。
 
+## ベースから最適化（optimize --base）
+
+データが増えたり運転の状態が変わったりして、列やパラメータも選び直したいときは、前に作ったモデルを `--base` に渡して `optimize` します。
+
+```powershell
+uv run mloom optimize data/sample.parquet --base outputs/quality-lgbm/model.pkl --output outputs/quality-lgbm-new [--n-trials 50]
+```
+
+- 目的変数・タスク・モデル・CV の方法・フィルタ・除外した列・試行数・乱数の種などは、ベースの記録から引き継ぎます。明示した引数だけがベースより優先します。`--exclude-columns` と `--filters` は、ベースの値に足すのではなく置き換えます（`--filters` は `filters` と `train_filters` の両方）。
+- `--unavailable-sensors` は引き継がず、今のファイルを読みます。`--settings` は、渡さなければベースの記録の設定の値を使います。
+- ベースの目的変数・時刻の列・グループの列は除外した列の一覧に入っていないので、`--target`・`--time-column`・`--group-column` を変えると、ベースでそれだった列が説明変数の候補になりえます。外したいときは `--exclude-columns` で指定してください。
+- モデルが同じなら、ベースの最良のパラメータを探索の最初の試行にします（今回の探索範囲に入らなければ入れず、`warning:` の行を出します）。同じデータ・同じ引数なら、ベースより悪くなりません。
+- 記録の `base` に、ベースの作り方（ベースのモデル・パラメータ・採用した列・設定の値）を今回と同じ CV の分割で評価したスコア（`cv_scores_on_this_data`）と、分割ごとの差（`comparison`）が残ります。
+  - `comparison` は正なら今回の方が良い向きに揃えてあります（rmse なら「ベース − 今回」、r2 なら「今回 − ベース」）。`comparison.mean` の絶対値が `comparison.std` より小さければ、差があるとは言えません。
+  - ベースの列とパラメータはベースのデータで選んだもので、今回の評価側の行と重なることがあるので、ベースに有利になりえます。
+  - 目的変数・タスク・指標が違えば評価せず、`cv_scores_on_this_data` と `comparison` は `null`、`not_compared` に理由が入ります。ベースの採用した列が使えなくなっていれば外して評価し、`base.dropped_columns` に理由を残します。1 列も残らなければ評価しません（`not_compared` に `columns`）。
+- 保存するのは常に今回の探索の結果です。ベースの作り方の方が良ければ、`mloom refit` でベースの作り方のまま学習し直してください。最後は、学習期間の後のデータで `mloom predict` のスコアを確かめてください。
+- `--output` にベースと同じディレクトリは指定できません（終了コード 2）。
+
 ## 設定の既定値
 
 使う側の `config/mloom.toml` に無いキーは、mloom リポジトリの次のファイルから読みます（上ほど優先）。
@@ -156,6 +175,13 @@ run = mloom.read_run("outputs/quality-ridge/model.pkl")  # 記録の辞書（mlo
 base = mloom.load_base("outputs/quality-ridge/model.pkl")
 refit = mloom.refit_model("data/sample.parquet", base)  # filters・train_filters・settings を渡すと差し替える
 refit.save("outputs/quality-ridge-refit")
+
+# ベースから最適化（「ベースから最適化（optimize --base）」）。replace でベースの引数と設定の値を保ったまま変える
+import dataclasses
+
+again = mloom.optimize_model("data/sample.parquet", dataclasses.replace(base.config, n_trials=50), base=base)
+print(again.to_dict()["base"]["comparison"])  # 分割ごとの差。正なら今回の方が良い
+again.save("outputs/quality-ridge-new")
 ```
 
 ## 行のフィルタ

@@ -7,6 +7,7 @@ from mloom.errors import InputError
 from mloom.filters import Condition, check_conditions
 from mloom.metrics import DEFAULT_METRICS, METRICS, Metric
 from mloom.models import MODELS, ModelSpec
+from mloom.settings import Settings
 
 TASKS: tuple[str, ...] = ("regression", "classification")
 CV_METHODS: tuple[str, ...] = ("timeseries", "group", "kfold")
@@ -46,9 +47,11 @@ class Config:
     unavailable_sensors : Path | None
         JSON file of the sensors that must not be used, relative to the
         current directory. ``None`` reads no file.
-    settings : Path | None
+    settings : Path | Settings | None
         Project settings file (``mloom.settings``), relative to the
         current directory. ``None`` reads only the defaults of mloom.
+        ``Settings`` are used as they are, without reading any file (the
+        settings of a base: ``mloom.load_base``).
     n_trials : int
         Number of trials of the hyperparameter search.
     timeout : float | None
@@ -69,7 +72,7 @@ class Config:
     filters: tuple[Condition, ...] = ()
     train_filters: tuple[Condition, ...] = ()
     unavailable_sensors: Path | None = field(default=DEFAULT_UNAVAILABLE_SENSORS)
-    settings: Path | None = field(default=DEFAULT_SETTINGS)
+    settings: Path | Settings | None = field(default=DEFAULT_SETTINGS)
     n_trials: int = 100
     timeout: float | None = None
     seed: int = 0

@@ -58,7 +58,9 @@ def test_load_base_reads_how_the_base_was_made(base_path: Path, make_config: Cal
         filters=({"column": "s5", "op": "lt", "value": 2},),
         train_filters=({"column": "t", "op": "lt", "value": 100},),
     )
-    assert base.config == replace(expected, unavailable_sensors=Config.unavailable_sensors, settings=Config.settings)
+    assert base.config == replace(expected, unavailable_sensors=Config.unavailable_sensors, settings=base.settings)
+    # replace(base.config, ...) keeps the settings of the base.
+    assert base.config.settings is base.settings
     # A user-excluded column that is not in the data is kept in the config.
     assert record["exclude_columns"] == ["c", "absent"]
     assert base.settings.clip.method == "iqr"

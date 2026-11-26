@@ -1,23 +1,35 @@
 """``optimize_model``: feature selection and hyperparameter search, then the final fit.
 
-See "処理の流れ" in ``docs/spec.md``.
+See "処理の流れ" in ``docs/spec.md``. With a base (``mloom optimize --base``),
+the search tries the parameters of the base first, and how the base was made
+is scored on the same CV folds (see "ベースのモデル").
 """
 
+import math
 import warnings
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import optuna
+from optuna.distributions import BaseDistribution, FloatDistribution, IntDistribution
 from sklearn.metrics import get_scorer
 from sklearn.pipeline import Pipeline
 
+from mloom.base import Base, base_columns, describe_base, warn_dropped
 from mloom.columns import require_candidates
 from mloom.config import Config
 from mloom.data import Data
 from mloom.errors import OptimizationError
+from mloom.fixed_cv import fixed_fold_models, fixed_fold_scores
 from mloom.interpretation import FoldModels, importance_groups
-from mloom.models import K_PARAM
-from mloom.pipeline import Preprocessing, build_pipeline, fit_preprocess
+from mloom.models import K_PARAM, Params
+from mloom.pipeline import (
+    Preprocessing,
+    build_pipeline,
+    fit_preprocess,
+    plan_preprocessing,
+)
 from mloom.result import Result
 from mloom.selection import (
     correlation_clusters,
@@ -26,10 +38,26 @@ from mloom.selection import (
     top_columns,
 )
 from mloom.settings import load_settings
-from mloom.training import FinalModel, TrainingData, fit_final, prepare_training
+from mloom.training import (
+    FinalModel,
+    TrainingData,
+    describe_scores,
+    fit_final,
+    prepare_training,
+)
+
+MODE = "optimize"
 
 
-def optimize_model(data: Data, config: Config) -> Result:
+@dataclass(frozen=True)
+class _BaseScores:
+    # How the base was made, scored on the CV folds of this run (``_score_base``); folds is None when not compared.
+    dropped: list[dict[str, Any]]
+    folds: list[float] | None
+    not_compared: list[str]
+
+
+def optimize_model(data: Data, config: Config, *, base: Base | None = None) -> Result:
     """Exclude columns, search features and hyperparameters, and fit the best pipeline.
 
     Parameters
@@ -37,13 +65,22 @@ def optimize_model(data: Data, config: Config) -> Result:
     data : Data
         Path of a Parquet file, or a polars DataFrame.
     config : Config
-        What to optimize and how.
+        What to optimize and how. To start from a base, build it with
+        ``dataclasses.replace(base.config, ...)``.
+    base : Base | None
+        A base (``mloom.load_base``). When given, the search tries its
+        parameters first if ``config.model`` is its model and they are in
+        the search space of this run (otherwise, with a warning), how it was
+        made is scored on the CV folds of this run, and the record gets
+        ``base``. The columns of the base that are no longer candidates are
+        dropped from that score, each with a warning (``warnings.warn``).
+        The saved model is always that of this search.
 
     Returns
     -------
     Result
         The fitted pipeline and the record of the run; ``Result.save`` writes
-        both as ``model.pkl``.
+        both as ``model.pkl``, and refuses to overwrite the base.
 
     Raises
     ------
@@ -59,8 +96,11 @@ def optimize_model(data: Data, config: Config) -> Result:
     training = prepare_training(data, config, load_settings(config.settings), require_candidates)
     # The clusters do not use the target, so they come from the statistic rows of the whole period.
     clusters = correlation_clusters(training.x_statistics, training.settings.selection.max_correlation)
+    # The base is scored before the search, so that an error in it comes before the long part of the run.
+    base_scores = None if base is None else _score_base(base, config, training)
+    first = None if base is None else _first_trial(base, config, len(clusters))
 
-    study, prepared = _search(config, training, clusters)
+    study, prepared = _search(config, training, clusters, first)
     best = study.best_trial
     k = best.params[K_PARAM]
     params = {name: value for name, value in best.params.items() if name != K_PARAM}
@@ -88,12 +128,94 @@ def optimize_model(data: Data, config: Config) -> Result:
         ),
         best_params=best.params,
         hpo=_describe_search(study, config),
-        base=None,
+        base=None
+        if base is None or base_scores is None
+        else _describe_base(base, base_scores, first is not None, best.user_attrs["fold_scores"], config),
     )
 
 
+def _score_base(base: Base, config: Config, training: TrainingData) -> _BaseScores:
+    # The model, parameters, columns still candidates and preprocessing of the base, on the folds of this run.
+    keep, dropped = base_columns(base, training.columns)
+    warn_dropped(dropped)
+    differs = {
+        "target": config.target != base.config.target,
+        "task": config.task != base.config.task,
+        "metric": config.metric_name != base.config.metric_name,
+        "columns": not keep,
+    }
+    not_compared = [reason for reason, differ in differs.items() if differ]
+    if not_compared:
+        return _BaseScores(dropped, None, not_compared)
+    params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
+    preprocessing = plan_preprocessing(base.config, base.settings)
+    models = fixed_fold_models(base.config, params, preprocessing, keep, training)
+    return _BaseScores(dropped, fixed_fold_scores(models, training), [])
+
+
+def _first_trial(base: Base, config: Config, n_clusters: int) -> Params | None:
+    # The parameters of the base, when they are in the search space of this run, with k kept within its range.
+    if config.model != base.config.model:
+        return None
+    params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
+    space = _search_space(config, n_clusters)
+    outside = sorted(
+        name for name in params.keys() | space.keys() if name not in space or not _contains(space[name], params.get(name))
+    )
+    if outside:
+        described = ", ".join(f"{name}={params.get(name)!r}" for name in outside)
+        warnings.warn(
+            f"the parameters of the base are not tried first: {described} not in the search space of this run",
+            UserWarning,
+            stacklevel=3,
+        )
+        return None
+    return {**params, K_PARAM: min(base.best_params[K_PARAM], n_clusters)}
+
+
+def _search_space(config: Config, n_clusters: int) -> dict[str, BaseDistribution]:
+    # The distributions a trial of this run samples from; the values of this throwaway trial are not used.
+    trial = optuna.create_study().ask()
+    config.model_spec.suggest(trial, n_clusters)
+    return trial.distributions
+
+
+def _contains(distribution: BaseDistribution, value: object) -> bool:
+    # Optuna 5.1.0 uses an enqueued value out of its distribution as it is (2026-11-26), so it is checked here.
+    if not isinstance(distribution, FloatDistribution | IntDistribution):
+        return False
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    if not distribution.low <= value <= distribution.high:
+        return False
+    if distribution.step is None:
+        return True
+    n_steps = (value - distribution.low) / distribution.step
+    return math.isclose(n_steps, round(n_steps))
+
+
+def _describe_base(
+    base: Base, scores: _BaseScores, enqueued: bool, best_folds: list[float], config: Config
+) -> dict[str, Any]:
+    folds = scores.folds
+    return {
+        **describe_base(base, MODE, scores.dropped),
+        "enqueued": enqueued,
+        "cv_scores_on_this_data": None if folds is None else describe_scores(folds),
+        "comparison": None if folds is None else describe_scores(_differences(best_folds, folds, config)),
+        "not_compared": scores.not_compared,
+    }
+
+
+def _differences(ours: list[float], theirs: list[float], config: Config) -> list[float]:
+    # Positive where this run is better than the base.
+    if config.metric_spec.direction == "minimize":
+        return [base - this for this, base in zip(ours, theirs, strict=True)]
+    return [this - base for this, base in zip(ours, theirs, strict=True)]
+
+
 def _search(
-    config: Config, training: TrainingData, clusters: list[list[int]]
+    config: Config, training: TrainingData, clusters: list[list[int]], first: Params | None
 ) -> tuple[optuna.Study, list[tuple[Pipeline, np.ndarray]]]:
     # Also returns the fitted preprocessing and the ranking of each fold (``_prepare_fold``).
     x, y, cv_plan = training.x, training.y, training.cv_plan
@@ -126,6 +248,9 @@ def _search(
         return float(np.mean(fold_scores))
 
     study = optuna.create_study(direction=metric.direction, sampler=optuna.samplers.TPESampler(seed=config.seed))
+    if first is not None:
+        # Tried first, and compared with the other trials like any of them.
+        study.enqueue_trial(first)
     study.optimize(objective, n_trials=config.n_trials, timeout=config.timeout)
     if not _completed(study):
         raise OptimizationError("no trial finished with a score; see the warnings of the failed trials")

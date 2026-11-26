@@ -285,11 +285,7 @@ def fit_final(
         impute={"method": training.preprocessing.impute},
         columns=training.columns,
         selected_columns=[candidates[i] for i in final.keep],
-        cv_scores={
-            "folds": fold_scores,
-            "mean": float(np.mean(fold_scores)),
-            "std": float(np.std(fold_scores)),
-        },
+        cv_scores=describe_scores(fold_scores),
         interpretation={
             "permutation_importance": importance.record,
             "coefficients": linear_coefficients(pipeline, background),
@@ -305,3 +301,19 @@ def fit_final(
         hpo=hpo,
         base=base,
     )
+
+
+def describe_scores(folds: list[float]) -> dict[str, Any]:
+    """Describe values of the CV folds as the record does (``cv_scores``).
+
+    Parameters
+    ----------
+    folds : list[float]
+        A value for each fold.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``folds``, their ``mean``, and their population ``std`` (``np.std``).
+    """
+    return {"folds": folds, "mean": float(np.mean(folds)), "std": float(np.std(folds))}

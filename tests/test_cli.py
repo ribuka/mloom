@@ -15,14 +15,6 @@ from mloom.cli import EXIT_INPUT, EXIT_OK, main
 from mloom.prediction import predict
 
 
-@pytest.fixture
-def data_path(frame: pl.DataFrame, tmp_path: Path) -> Path:
-    """Write the shared frame as Parquet and return its path."""
-    path = tmp_path / "data.parquet"
-    frame.write_parquet(path)
-    return path
-
-
 def _args(data_path: Path, output: Path, *extra: str) -> list[str]:
     return [
         "optimize",
@@ -67,6 +59,69 @@ def test_optimize_saves_and_prints_model_pkl(
     shown = capsys.readouterr().out
     assert json.loads(shown) == run
     assert "校正切れ" in shown  # not escaped
+
+
+@pytest.mark.parametrize("missing", ["--target", "--task", "--model", "--cv"])
+def test_optimize_without_base_needs_target_task_model_and_cv(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], missing: str
+) -> None:
+    """Without ``--base``, a missing ``--target``, ``--task``, ``--model`` or ``--cv`` exits with 2."""
+    args = _args(data_path, tmp_path / "out")
+    at = args.index(missing)
+    assert main(args[:at] + args[at + 2 :]) == EXIT_INPUT
+    assert f"error: optimize needs {missing} without --base" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_optimize_with_base_keeps_its_arguments_unless_given(
+    data_path: Path, filters_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--base`` alone keeps every argument of the base; each argument given replaces its value only."""
+    base_filters = tmp_path / "base-filters.json"
+    base_filters.write_text(
+        json.dumps(
+            {
+                "filters": [{"column": "s5", "op": "lt", "value": 2}],
+                "train_filters": [{"column": "t", "op": "lt", "value": 110}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    extra = ("--cv", "timeseries", "--time-column", "t", "--filters", str(base_filters), "--seed", "3")
+    assert main(_args(data_path, tmp_path / "base", *extra)) == EXIT_OK
+    base_path = tmp_path / "base" / "model.pkl"
+    base = read_run(base_path)
+    capsys.readouterr()
+
+    def run(name: str, *given: str) -> dict:
+        args = ["optimize", str(data_path), "--base", str(base_path), "--output", str(tmp_path / name), *given]
+        assert main(args) == EXIT_OK
+        return read_run(tmp_path / name / "model.pkl")
+
+    def kept(record: dict) -> dict:
+        return {
+            "target": record["target"],
+            "task": record["task"],
+            "model": record["model"],
+            "cv": {key: record["cv"][key] for key in ("method", "n_splits", "time_column", "group_column")},
+            "seed": record["seed"],
+            "filters": record["filters"],
+            "train_filters": record["train_filters"],
+            "metric": record["metric"],
+            "n_trials": record["hpo"]["n_trials"],
+            "user_excluded": [c["name"] for c in record["excluded_columns"] if c["reason"] == "user_excluded"],
+        }
+
+    same = run("same")
+    assert kept(same) == kept(base)
+    assert kept(base)["user_excluded"] == ["c"]
+    assert same["base"]["mode"] == "optimize"
+
+    assert kept(run("model", "--model", "random_forest")) == {**kept(base), "model": "random_forest"}
+    assert kept(run("excluded", "--exclude-columns", "lot")) == {**kept(base), "user_excluded": ["lot"]}
+    with_filters = kept(run("filters", "--filters", str(filters_path)))
+    filters = json.loads(filters_path.read_text(encoding="utf-8"))
+    assert with_filters == {**kept(base), **filters}
 
 
 def test_invalid_input_exits_with_2(data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -348,18 +403,20 @@ def test_refit_of_an_invalid_base_exits_with_2(data_path: Path, tmp_path: Path, 
     assert "make it again with mloom optimize" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("command", ["refit", "optimize"])
 @pytest.mark.parametrize("output", ["model", "./model", "model/", f"model{os.sep}", "./model/../model"])
-def test_refit_over_its_base_exits_with_2_before_reading_the_data(
+def test_saving_over_the_base_exits_with_2_before_reading_the_data(
     first_half_model: Path,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     output: str,
+    command: str,
 ) -> None:
     """The directory of the base, however it is written, stops with exit code 2; the base is not touched."""
     monkeypatch.chdir(tmp_path)
     before = (first_half_model.stat().st_mtime_ns, first_half_model.read_bytes())
-    args = ["refit", "missing.parquet", "--base", str(first_half_model), "--output", output]
+    args = [command, "missing.parquet", "--base", str(first_half_model), "--output", output]
     assert main(args) == EXIT_INPUT
     assert "would overwrite the base" in capsys.readouterr().err
     assert (first_half_model.stat().st_mtime_ns, first_half_model.read_bytes()) == before

@@ -13,30 +13,15 @@ import pytest
 
 from mloom import (
     Base,
-    Config,
     InputError,
     Result,
     load_base,
-    optimize_model,
     read_run,
     refit_model,
 )
 from mloom.models import MODELS
 
 MODEL_TASKS = [(model, task) for model, spec in MODELS.items() for task in spec.builders]
-
-
-@pytest.fixture
-def make_base(
-    frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path
-) -> Callable[..., tuple[Result, Base]]:
-    """Optimize on the shared frame, save to ``<tmp>/base`` and load it as a base; keyword arguments go to the config."""
-
-    def make(**overrides: object) -> tuple[Result, Base]:
-        result = optimize_model(frame, make_config(**overrides))
-        return result, load_base(result.save(tmp_path / "base"))
-
-    return make
 
 
 def _predictions(result: Result, frame: pl.DataFrame) -> np.ndarray:
