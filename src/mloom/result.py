@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 from sklearn.pipeline import Pipeline
 
+from mloom.base import check_output
 from mloom.columns import ColumnPlan
 from mloom.config import Config
 from mloom.model_file import write_model_file
@@ -91,9 +92,10 @@ class Result:
         ``"auto"`` resolved for the model (``Preprocessing.impute``).
     columns : ColumnPlan
         The candidate and excluded columns.
-    selection : dict[str, Any]
+    selection : dict[str, Any] | None
         The clusters of similar candidate columns and their representatives
-        in the fitted pipeline (``mloom.selection.describe_selection``).
+        in the fitted pipeline (``mloom.selection.describe_selection``);
+        ``None`` for a refit, which selects no representative.
     selected_columns : list[str]
         The candidate columns the fitted pipeline uses.
     best_params : dict[str, Any]
@@ -108,8 +110,9 @@ class Result:
         apply.
     cv : dict[str, Any]
         Description of the CV split.
-    hpo : dict[str, Any]
-        Description of the search.
+    hpo : dict[str, Any] | None
+        Description of the search; ``None`` for a refit, which searches
+        nothing.
     created_at : str
         ISO 8601 time the run finished.
     training_hashes : np.ndarray
@@ -123,6 +126,11 @@ class Result:
     shap_background : np.ndarray
         Mean of the input of the estimator on the rows the pipeline was
         fitted on (``mloom.explain.shap_background``).
+    base : dict[str, Any] | None
+        The base of a refit (``mloom.refit.refit_model``): its ``path``,
+        the ``mode``, its ``created_at``, ``mloom_version`` and
+        ``cv_scores``, and the ``dropped_columns``; ``None`` for
+        ``optimize_model``.
     """
 
     pipeline: Pipeline
@@ -133,17 +141,18 @@ class Result:
     clip: dict[str, Any]
     impute: dict[str, Any]
     columns: ColumnPlan
-    selection: dict[str, Any]
+    selection: dict[str, Any] | None
     selected_columns: list[str]
     best_params: dict[str, Any]
     cv_scores: dict[str, Any]
     interpretation: dict[str, Any]
     cv: dict[str, Any]
-    hpo: dict[str, Any]
+    hpo: dict[str, Any] | None
     created_at: str
     training_hashes: np.ndarray
     last_time: TimeValue | None
     shap_background: np.ndarray
+    base: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
         """Build the record of the run, the first pickle of ``model.pkl``.
@@ -156,6 +165,7 @@ class Result:
         config = self.config
         return {
             "mloom_version": version("mloom"),
+            "base": self.base,
             "created_at": self.created_at,
             "data": vars(self.data),
             "target": config.target,
@@ -164,6 +174,7 @@ class Result:
             "metric": config.metric_name,
             "metric_direction": config.metric_spec.direction,
             "seed": config.seed,
+            "exclude_columns": list(config.exclude_columns),
             "filters": [dict(condition) for condition in config.filters],
             "train_filters": [dict(condition) for condition in config.train_filters],
             "unavailable_sensors": {
@@ -224,7 +235,15 @@ class Result:
         -------
         Path
             Path of ``model.pkl``.
+
+        Raises
+        ------
+        InputError
+            When the result is a refit and ``model.pkl`` of ``output_dir``
+            is its base (``mloom.base.check_output``); nothing is written.
         """
+        if self.base is not None:
+            check_output(output_dir, self.base["path"])
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         return write_model_file(directory, self.to_dict(), self.model_bundle())

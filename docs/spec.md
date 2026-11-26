@@ -34,6 +34,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | 予測の入口 | `pickle.load` に加えて、`mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 ユーザー判断。未決 10。スコア・混同行列・SHAP は 2026-11-26 に Issue #6 で実装） | フィルタの適用と、フィルタの外の行を NaN にする処理を 1 か所にまとめ、Skill から予測まで実行できるようにするため |
 | 行のフィルタ | 列と値の条件で、学習と予測に使う行を絞れる。条件は AND だけで、定義を `model.pkl` の記録とモデルの両方に残す（2026-11-26 ユーザー判断。「行のフィルタ」） | 運転条件などで、モデルを使う範囲を決めるため |
 | 前処理の方式 | 説明変数のクリップと補完の方式を、設定ファイルで選べる（2026-11-26 ユーザー判断。2026-11-26 に実装。「前処理」） | データによって適した前処理が違うため |
+| ベースのモデル | 前に作った `model.pkl` をベースとして渡し、その作り方（採用した列、パラメータ、設定の値、フィルタ、CV の方法）のまま新しいデータで学習し直せる（`mloom refit`）。ベースは 1 段目の記録だけを読む（2026-11-26 ユーザー判断。Issue #16 で実装。「ベースのモデル」） | データが増えたときに、運用中のモデルと同じ作り方で学習し直すため。ゼロから探索し直すと、採用する列やパラメータが毎回変わり、引数もすべて指定し直す必要がある。記録は scikit-learn の版に依らず読めるので、更新の後も refit できる |
 | 本体の形 | 処理の本体は決定論的な Python コードにする。Skill は「ユーザーの指定を CLI の引数に変換し、結果を説明する」だけにする | どの列を除外するか、どう評価するか、何を保存するかを、実行のたびに変わらないようにするため |
 | 入口 | **Python API が本体**。Skill 向けに薄い CLI を用意する。CLI は Python API を呼ぶだけにする | 人は Notebook や既存コードから API で使い、エージェントは設定を渡して 1 回実行し、終了コードと記録（`mloom show`）で結果を確かめる。センサ除外・特徴量選択・HPO の実装は 1 か所に置く |
 | API の形 | `optimize_model(data, config)` が学習済み Pipeline と評価結果を返し、`result.save(output_dir)` で記録とモデルを `model.pkl` に保存する | 同上 |
@@ -55,7 +56,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 ```text
 人（Notebook / Python コード）──────────────┐
                                              ▼
-エージェント ─ SKILL.md ─ CLI（mloom optimize）─▶ Python API（optimize_model）
+エージェント ─ SKILL.md ─ CLI（mloom optimize / refit）─▶ Python API（optimize_model / refit_model）
                                              │
                                              ▼
                           output_dir/model.pkl（1 段目: 記録、2 段目: モデル）
@@ -69,6 +70,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | --- | --- | --- |
 | Notebook や既存の Python コード | Python API | Parquet のパスか手元の Polars DataFrame を渡し、学習済み Pipeline とスコアをその場で確かめる |
 | Skill やシェルから実行するエージェント | CLI | 引数を渡して 1 回実行し、終了コードと `mloom show` で出す記録で結果を確かめる。Python スクリプトを毎回生成しなくてよい |
+| 運用中のモデルを、データが増えたので同じ作り方で学習し直す | CLI（`mloom refit`）か Python API（`refit_model`） | ベースの `model.pkl` を渡す。採用した列・パラメータ・設定・フィルタ・CV の方法はベースの記録から読み、探索しない（「ベースのモデル」） |
 | mloom が無い環境での予測 | `pickle.load` | `model.pkl` を 2 回 `pickle.load` し、2 段目のモデルから Pipeline とフィルタの定義を取り出し、予測する側でフィルタを適用してから `predict` する（「`model.pkl`」） |
 
 ## 入力
@@ -719,6 +721,48 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   - 分類で、`positive_class` なしに `cm_predicted_threshold` を与えた（2026-11-26 実装で決定。与えた閾値が黙って無視されるのを防ぐため）。
 - 分類の実測が陽性かどうかも、`str(実測のクラス) == str(positive_class)` で決める。
 
+### ベースのモデル
+
+決定事項（2026-11-26 ユーザー判断。Issue #16 で実装）: 前に作った `model.pkl` をベースとして渡し、その作り方（採用した列、`best_params`、設定の値、フィルタ、CV の方法）のまま、新しいデータで学習し直せる（`mloom refit`）。データが増えたときに、運用中のモデルと同じ作り方で学習し直すため。ゼロから探索し直すと、採用する列やパラメータが毎回変わり、引数もすべて指定し直す必要がある。ベースからの最適化（`mloom optimize --base`）は #17、1 列ずつ外す・足す確認のモードは保留。
+
+ベースの読み込み（`mloom.load_base(path) -> Base`、`mloom.base`）:
+
+- `mloom.read_run` で 1 段目の記録だけを読み、2 段目のモデルは読まない。scikit-learn の版が変わってモデルが読めなくなっていても refit できる（2026-11-26、記録だけを書いたファイルで refit できることを `tests/test_refit.py` で確かめた）。
+- ファイルが無い、記録の入っていない `model.pkl` は、`read_run` の `InputError` のまま（終了コード 2）。
+- `Base` は frozen dataclass で、`path`（渡したとおり）、`record`（読んだ記録）、`config`、`settings`、`selected_columns`、`best_params` を持つ。
+- `Config` の欄と記録のキーの対応:
+
+  | `Config` の欄 | 記録のキー |
+  | --- | --- |
+  | `target`・`task`・`model`・`metric`・`seed` | 同じ名前の一番上のキー |
+  | `cv`・`n_splits`・`time_column`・`group_column` | `cv.method`・`cv.n_splits`・`cv.time_column`・`cv.group_column` |
+  | `exclude_columns` | 一番上の `exclude_columns` |
+  | `filters`・`train_filters` | 同じ名前の一番上のキー（`check_conditions` で検査する） |
+  | `n_trials`・`timeout` | `hpo.n_trials`・`hpo.timeout`。`hpo` が `null`（refit の記録）なら `Config` の既定値（refit は探索しないので使わない） |
+  | `unavailable_sensors`・`settings` | 記録に無いので `Config` の既定値。refit は引数で受け取る |
+
+  - `exclude_columns` は、記録の一番上に足した `exclude_columns`（`Config.exclude_columns` そのまま）から読む（2026-11-26、Issue #16 の実装で決定）。Issue の当初案は `excluded_columns` のうち `reason` が `user_excluded` の列だったが、そこには、データに無い列と、目的変数・`time_column`・`group_column` を兼ねる列が残らない（`mloom.columns.name_reason` は目的変数と役割の列を先に判定し、`plan_columns` はデータにある列だけを見る）。ベースのデータに無かった列が新しいデータに現れると、ユーザーが外した列なのに候補列になってしまうため、指定したとおりの値を残す。
+- 設定の値: 記録の `settings` の表ごとの値を、`mloom.toml` と同じ検査で読む（`mloom.settings.settings_from_record`）。`sources` はどのキーもベースの `model.pkl` のパス、`files` は `[{"role": "base", "path": "<ベースの model.pkl のパス>", "found": true}]`。記録の `sources`・`files` と、mloom が知らないキーは読まない。
+- 必要なキー: 上の表のキーの全部（`hpo` が `null` なら `hpo.n_trials`・`hpo.timeout` は要らない）、`selected_columns`・`best_params`、refit が記録に写す `created_at`・`cv_scores`、設定のすべての表とキー。無い、型や値が違うときは `InputError`（終了コード 2）。メッセージに、足りない（または不正な）キーと、記録を作った版（`mloom_version`）を入れ、`mloom optimize` で作り直すよう案内する。
+  - 古い形式を読み替える処理は作らない（`AGENTS.md`）。版が違っても、必要なキーがそろっていて値が正しければ読む。記録の形式が変わる更新の後は、古いベースが使えず作り直しになるが、受け入れる（ユーザー判断）。
+
+refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の流れのうち、探索を除いたもの:
+
+1. ベースの `config` の `filters`・`train_filters`（`None` ならベースの値）と `unavailable_sensors` を差し替え、`optimize_model` と同じ関数（`mloom.training.prepare_training`）で、行のフィルタ・行の選択・列の除外・CV の分割を行う。
+   - 使えないセンサは、ベースの値ではなく、今のファイルを読む（ベースの後でセンサが壊れていることがあるため）。
+   - 設定は、`settings` が `None` ならベースの記録の値、パスなら `optimize` と同じ順（そのファイル → mloom の既定値）で読む（同じ作り方で再現するため）。
+2. 採用する列: ベースの `selected_columns` のうち、今回の候補列にあるもの（ベースの順）。無い列は外し、理由（今回の `excluded_columns` の `reason`。データに列が無ければ `not_in_data`）を記録の `base.dropped_columns` に残し、1 列ずつ `warnings.warn` で警告する（ユーザー判断。運用を止めないため。採用する列が減ると振る舞いが変わるので、Skill が必ず伝える）。
+   - 1 列も残らなければ `InputError`（終了コード 2）。メッセージに外した列と理由を入れ、`mloom optimize` で作り直すよう案内する。
+3. パラメータ: ベースの `best_params` から `k` を除いて固定する。`pls` の `n_components` は、`build_pipeline` が採用する列の数で切り詰める（記録の `best_params.n_components` はベースの値のまま）。
+4. CV のスコア: 分割ごとに、`optimize_model` と同じ行（学習側の目的変数がある行と、学習側の目的変数が欠損した行）で前処理を fit し、固定した列とパラメータで学習側を学習して評価側を評価する（`metric.report_value`）。Optuna の study は作らない。分割の学習の失敗は、`optimize` の試行の失敗と違い、そのままエラーにする（終了コード 1）。
+5. 最終学習と記録の組み立ては `optimize_model` と同じ（`mloom.training.fit_final`）。`best_params.k` は採用する列の数。permutation importance のグループは採用した列 1 列ずつ（クラスタで代表を選ばないため）。
+
+- refit の `cv_scores` は、ベースの `cv_scores` と一致しなくてよい。ベースは分割ごとに列を選び直したスコアで、refit はすべての分割で同じ列を使うため（同じ入力で 2 回 refit すると完全に一致する）。列とパラメータはベースのデータで選んだもので、新しいデータの評価側の行と重なることがあるので、スコアは楽観的になりうる（受け入れる。探索しなくても、新しいデータでの目安があると判断しやすいため。Skill が伝え、学習期間の後のデータで `mloom predict` を使って確かめるよう勧める）。
+- 同じデータで refit すると、ベースと同じ列・パラメータで学習され、同じ予測になる（2026-11-26、全モデル・タスクで `tests/test_refit.py` で確かめた）。
+- 出力先: 保存先の `model.pkl` がベースの `model.pkl` と同じファイルなら `InputError`（終了コード 2）。運用中のベースを誤って上書きしないため。両方のパスを `Path.resolve()` して比べ、両方が既にあるときは `Path.samefile` でも比べる（`mloom.base.check_output`）。
+  - `Result.save` が、`base` のある結果（refit）で確かめる。CLI は `load_base` の直後、データを読む前に同じ関数を呼ぶ（2026-11-26、Issue #16 の実装で決定。`refit_model` は出力先を受け取らず、`Result.save` で確かめるだけではデータを読んで学習した後になるため）。
+- 記録の形は `optimize` と同じ。違いは `hpo` と `selection` が `null`、一番上の `base` に値があること（「記録」）。`model.pkl` の形（2 段）も同じで、`mloom predict`・`mloom show`・mloom なしの `pickle.load` で使える（2026-11-26、`tests/test_refit.py`・`tests/test_cli.py` で確かめた）。
+
 ### 記録
 
 `model.pkl` の 1 段目（「`model.pkl`」）。`mloom show <model.pkl>` で JSON に出せ、`mloom.read_run(path)` で辞書として読める。以前は `run.json` として別のファイルに保存していた（2026-11-26、Issue #18 で `model.pkl` に入れた。キーと値は変えていない）。
@@ -737,6 +781,23 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
 
 - 一番上の `selection`（`selected_columns` の直前）と、`settings.selection` を足した（2026-11-26、Issue #13。「特徴量選択」）。`selection.n_clusters` はクラスタの数（1 列だけのクラスタも数える）。`selection.clusters` は 2 列以上のクラスタだけを候補列の順に並べ、`representative` は最終モデルでそのクラスタの代表になった列、`selected` はそれが `selected_columns` に入っているか。
 
+- 一番上の `base`（`mloom_version` の直後）と `exclude_columns`（`seed` の直後。`Config.exclude_columns` のとおり）を足した（2026-11-26、Issue #16。「ベースのモデル」）。
+  - `optimize` の記録では `base` は `null`。refit の記録では `hpo` と `selection` が `null` で、`base` は次の形。
+
+    ```json
+    "base": {
+      "path": "outputs/quality-lgbm/model.pkl",
+      "mode": "refit",
+      "created_at": "2026-11-26T10:00:00+09:00",
+      "mloom_version": "0.1.0",
+      "cv_scores": {"folds": [0.81, 0.79, 0.84, 0.80, 0.82], "mean": 0.812, "std": 0.017},
+      "dropped_columns": [{"name": "TI-101", "reason": "unavailable_sensor"}]
+    }
+    ```
+
+  - `path` は渡した `model.pkl` のパス（渡したとおりの文字列）。`created_at`・`mloom_version`・`cv_scores` はベースの記録の値をそのまま写す。`cv_scores` はベースを作ったときのデータと分割でのスコアで、今回の `cv_scores` とはデータが違うので、そのまま比べられない。`dropped_columns` は、使えなくなって外した列と理由（外さなければ空）。
+  - refit の `interpretation.permutation_importance` のグループは、採用した列 1 列ずつ（`columns` はその列だけ）。`best_params.k` は採用した列の数。
+
 - 一番上の `interpretation`（`cv_scores` の直後）と、`settings.importance` を足した（2026-11-26、Issue #14。「解釈」）。Skill が 1 か所を読めば済むように、3 つをまとめる。
   - `permutation_importance`: `metric`、`n_repeats`、`groups`（`column` は最終モデルが採用した列、`columns` はグループとして入れ替えた列（候補列の順）、`mean`・`std`・`folds`）。`n_repeats = 0` なら `null`。
   - `coefficients`: `output`（`"prediction"` か `"log_odds"`）と `columns`（`class`・`column`・`per_unit`・`per_std`）。木のモデルでは `null`。
@@ -746,6 +807,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
 ```json
 {
   "mloom_version": "0.1.0",
+  "base": null,
   "created_at": "2026-11-26T10:00:00+09:00",
   "data": {
     "path": "data/train.parquet", "n_rows": 12500, "n_columns": 320,
@@ -758,6 +820,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   "metric": "rmse",
   "metric_direction": "minimize",
   "seed": 0,
+  "exclude_columns": ["FI-999"],
   "filters": [{"column": "FI-101", "op": "gt", "value": 0}],
   "train_filters": [{"column": "timestamp", "op": "lt", "value": "2026-10-01T00:00:00"}],
   "unavailable_sensors": {
@@ -858,6 +921,20 @@ result.save("outputs/ridge")  # model.pkl（記録とモデル）。戻り値は
 mloom.read_run("outputs/ridge/model.pkl")  # 記録（「記録」）の辞書。モデルは読まない
 ```
 
+再学習（2026-11-26、Issue #16。「ベースのモデル」）:
+
+```python
+result = mloom.refit_model(
+    "data/train.parquet",         # または polars.DataFrame
+    mloom.load_base("outputs/ridge/model.pkl"),  # 記録だけを読む
+    filters=None,                  # None ならベースの filters
+    train_filters=None,            # None ならベースの train_filters
+    unavailable_sensors=Path("config/unavailable-sensors.json"),  # None なら読まない
+    settings=None,                 # None ならベースの設定の値。Path ならそのファイルを読む
+)
+result.save("outputs/ridge-refit")  # ベースの model.pkl と同じファイルなら InputError
+```
+
 予測（2026-11-26 に実装）:
 
 ```python
@@ -913,17 +990,28 @@ uv run mloom show outputs/ridge/model.pkl
 - `mloom.read_run` を呼び、記録を JSON（`ensure_ascii=False`、`indent=2`）で標準出力に出すだけにする。`> run.json` で、以前の `run.json` と同じ内容のファイルを作れる。
 - pickle を読むので、信頼できる出どころのファイルだけに使う。読めなければ終了コード 2。
 
+再学習（2026-11-26、Issue #16。「ベースのモデル」）:
+
+```powershell
+uv run mloom refit data/train.parquet --base outputs/ridge/model.pkl --output outputs/ridge-refit [--filters config/filters.json] [--unavailable-sensors config/unavailable-sensors.json] [--settings config/mloom.toml]
+```
+
+- `load_base`・`mloom.base.check_output`（データを読む前に、出力先がベースでないことを確かめる）・`load_filters`・`refit_model`・`result.save` を呼ぶだけにする。
+- `--filters` を渡したときだけ、`filters` と `train_filters` の両方をそのファイルの内容に差し替える（片方のキーが無ければ空）。`--unavailable-sensors` は `optimize` と同じ（既定 `config/unavailable-sensors.json`）。`--settings` は、渡さなければベースの記録の設定の値を使う。
+- ほかの引数（`--target`・`--model`・`--cv`・`--seed` など）は無い。同じ作り方を保つため。
+- API の警告（外した列など）は、`warning: ` で始まる 1 行ずつ標準エラーに出す（`warnings.catch_warnings(record=True)` で受け取り、学習の後に出す）。終了コードと標準出力は `optimize` と同じ。
+
 | 終了コード | 意味 |
 | --- | --- |
 | 0 | 成功。`model.pkl`（`predict` では予測の Parquet）を保存した。`show` では記録を出した |
 | 1 | 想定外のエラー |
-| 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`、`mloom.toml`、`--filters` のファイル、`model.pkl`） |
+| 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`、`mloom.toml`、`--filters` のファイル、`model.pkl`、refit のベースと出力先） |
 
 ## Skill
 
 - 本リポジトリの `skills/model-optimization/SKILL.md` に置く（2026-11-26 たたき台を作成。同日 Issue #7 で、配布と実行、`--filters`、`mloom predict`、前処理の設定に合わせて書き直した）。
 - 5 つの入力のうち足りないものはユーザーに聞く。CV の方法は Skill が推測して決めず、知っている列名を材料に聞き返す。
-- 役割は 2 つだけ: ユーザーの指定を CLI（`mloom optimize`・`mloom predict`・`mloom show`）の引数に変換して実行する、結果（`mloom show` で出す記録と予測の出力）を読んで説明する。
+- 役割は 2 つだけ: ユーザーの指定を CLI（`mloom optimize`・`mloom refit`・`mloom predict`・`mloom show`）の引数に変換して実行する、結果（`mloom show` で出す記録と予測の出力）を読んで説明する。
 - どの列を除外するか、どう評価するか、探索空間、前処理の方式、何を保存するかを Skill で決めない。それらは Python 側で固定する。スコアや指標も Skill で計算せず、mloom が出した値を伝える。
 
 Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
@@ -934,6 +1022,10 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 - 予測: ユーザーが予測を頼んだときに `mloom predict` を実行する。`--output` は、ユーザーが示さなければ `<model.pkl のディレクトリ>/predictions.parquet` にする（`mloom optimize` の `--output` を `outputs/<target>-<model>-<cv>` にするのと同じく、Skill が引数を作るための既定）。
   - 混同行列の閾値・陽性の向き・陽性のクラスは、ユーザーが示したときだけ渡す。一部だけ示されたら、残りを聞く。
   - `--shap` は、ユーザーが寄与を頼んだときだけ付ける。`--keep-columns` は、ユーザーが示した列だけ。
+- 再学習（2026-11-26、Issue #16）: ユーザーが既存のモデルの作り方のまま再学習を頼んだときに `mloom refit` を実行する。
+  - ベースの記録（`mloom show <model.pkl>`）に `train_filters` があれば、新しいデータでもその条件でよいかを聞き、ユーザーが示した条件だけを `--filters` に書く。
+  - `--output` は、ユーザーが示さなければ `<ベースの model.pkl のディレクトリ>-refit`。既にあれば上書きすることを伝える。
+  - `base.dropped_columns` があれば必ず伝える。`cv_scores` と `base.cv_scores` はデータが違うのでそのまま比べないこと、refit の `cv_scores` は楽観的になりうることを伝え、学習期間の後のデータで `mloom predict` を使って確かめるよう勧める。
 - 設定: 利用側の `config/mloom.toml`（`max_missing_rate`・`use_unlabeled_rows`・`[clip]`・`[impute]`・`[selection]`・`[importance]`）と `config/unavailable-sensors.json` を、ユーザーに頼まれない限り書き換えない。頼まれたときも、ユーザーが示したキーを、示した値にするだけ。
 
 ### 配布と実行
@@ -991,14 +1083,14 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 
 | モジュール | 責務 |
 | --- | --- |
-| `mloom` | 公開 API の再エクスポート（`optimize_model`、`predict`、`read_run`、`Config`、`Result`、例外） |
+| `mloom` | 公開 API の再エクスポート（`optimize_model`、`refit_model`、`load_base`、`predict`、`read_run`、`Config`、`Base`、`Result`、例外） |
 | `mloom.errors` | 例外（`InputError` は終了コード 2、それ以外は 1） |
 | `mloom.config` | `Config` の定義と、データが要らない検査 |
 | `mloom.metrics` | 評価指標と、タスクごとに選べる指標 |
 | `mloom.models` | モデルのレジストリ（推定器、標準化の要否、欠損を扱えるかと `auto` の補完、探索空間） |
 | `mloom.data` | データの読み込み |
 | `mloom.sensors` | `unavailable-sensors.json` の読み込み |
-| `mloom.settings` | 設定ファイル（`mloom.toml`）とその既定値の読み込み |
+| `mloom.settings` | 設定ファイル（`mloom.toml`）とその既定値の読み込みと、ベースの記録の設定の値の読み込み（`settings_from_record`） |
 | `mloom.rows` | 学習に使う行の選択（目的変数の欠損と無限大）と、列ごとの無限大の行数 |
 | `mloom.columns` | 列の除外と理由の記録 |
 | `mloom.cv` | ユーザーが指定した CV の分割 |
@@ -1006,6 +1098,8 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.clip` | クリップの上下限の計算と、記録の `preprocessing.clip` |
 | `mloom.selection` | 特徴量選択：相関の高い列のクラスタ（CV の前に 1 回）と、その代表のランク付け（Pipeline の外で、分割ごとに 1 回）、記録の `selection` |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
+| `mloom.refit` | `refit_model`：ベースの列とパラメータを固定した、探索しない再学習 |
+| `mloom.base` | ベースの `model.pkl` の記録の読み込み（`load_base`）と、ベースを上書きしない確認（`check_output`） |
 | `mloom.training` | `optimize_model` と refit が共有する処理：行のフィルタ・行の選択・列の除外・CV の分割までの準備（`prepare_training`）と、最終学習と `Result` の組み立て（`fit_final`）。2026-11-26、Issue #16 で `mloom.optimize` から切り出した |
 | `mloom.result` | `Result`（記録とモデルの組み立て）と保存 |
 | `mloom.model_file` | `model.pkl` の形（1 段目の記録、2 段目のモデル）の書き出しと読み込み（`read_run`）。scikit-learn と numpy を import しない |

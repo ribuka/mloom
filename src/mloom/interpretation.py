@@ -129,8 +129,8 @@ def permutation_importance(
     rng = np.random.default_rng(config.seed)
     baselines = []
     worsening = np.zeros((len(groups), len(models.folds)))
-    for fold, ((train, test), (preprocess, keep)) in enumerate(zip(models.folds, models.prepared, strict=True)):
-        pipeline = _fit_fold(models, preprocess, keep, (x[train], y[train]))
+    for fold, (_, test) in enumerate(models.folds):
+        pipeline = fit_fold(models, fold, x, y)
         x_test, y_test = x[test], y[test]
         baseline = metric.report_value(float(scorer(pipeline, x_test, y_test)))
         baselines.append(baseline)
@@ -157,11 +157,28 @@ def permutation_importance(
     )
 
 
-def _fit_fold(
-    models: FoldModels, preprocess: Pipeline, keep: list[int], train: tuple[np.ndarray, np.ndarray]
-) -> Pipeline:
-    # The same pipeline the CV scores fitted on this fold; an error is not expected, so it is raised.
-    return build_pipeline(models.config, models.params, preprocess, keep).fit(*train)
+def fit_fold(models: FoldModels, fold: int, x: np.ndarray, y: np.ndarray) -> Pipeline:
+    """Fit the model of a CV fold on the training side of the fold.
+
+    Parameters
+    ----------
+    models : FoldModels
+        The models on the CV folds.
+    fold : int
+        Index of the fold.
+    x : np.ndarray
+        The candidate columns of the labeled rows before the preprocessing.
+    y : np.ndarray
+        Their target.
+
+    Returns
+    -------
+    Pipeline
+        The fitted pipeline, which takes a matrix of the candidate columns.
+    """
+    train, _ = models.folds[fold]
+    preprocess, keep = models.prepared[fold]
+    return build_pipeline(models.config, models.params, preprocess, keep).fit(x[train], y[train])
 
 
 def linear_coefficients(pipeline: Pipeline, background: np.ndarray) -> dict[str, Any] | None:

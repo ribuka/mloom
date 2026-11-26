@@ -88,6 +88,7 @@ def optimize_model(data: Data, config: Config) -> Result:
         ),
         best_params=best.params,
         hpo=_describe_search(study, config),
+        base=None,
     )
 
 

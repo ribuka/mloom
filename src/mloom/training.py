@@ -221,9 +221,10 @@ def fit_final(
     final: FinalModel,
     fold_scores: list[float],
     *,
-    selection: dict[str, Any],
+    selection: dict[str, Any] | None,
     best_params: dict[str, Any],
-    hpo: dict[str, Any],
+    hpo: dict[str, Any] | None,
+    base: dict[str, Any] | None,
 ) -> Result:
     """Fit the final model on all training rows and build the result of the run.
 
@@ -237,12 +238,14 @@ def fit_final(
         What the final model is fitted with.
     fold_scores : list[float]
         The metric of each CV fold (``Metric.report_value``).
-    selection : dict[str, Any]
+    selection : dict[str, Any] | None
         ``Result.selection``.
     best_params : dict[str, Any]
         ``Result.best_params``.
-    hpo : dict[str, Any]
+    hpo : dict[str, Any] | None
         ``Result.hpo``.
+    base : dict[str, Any] | None
+        ``Result.base``.
 
     Returns
     -------
@@ -292,4 +295,5 @@ def fit_final(
         selection=selection,
         best_params=best_params,
         hpo=hpo,
+        base=base,
     )

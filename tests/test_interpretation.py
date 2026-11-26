@@ -128,7 +128,7 @@ def test_zero_repeats_computes_no_importance(
     def fail(*args: Any) -> None:  # noqa: ANN401 - any arguments
         raise AssertionError("a fold was fitted")
 
-    monkeypatch.setattr(mloom.interpretation, "_fit_fold", fail)
+    monkeypatch.setattr(mloom.interpretation, "fit_fold", fail)
     run = optimize_model(strong_and_weak, make_config(model=model, settings=_importance_settings(tmp_path, 0))).to_dict()
     interpretation = run["interpretation"]
     assert interpretation["permutation_importance"] is None
