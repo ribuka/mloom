@@ -91,6 +91,9 @@ class Result:
         ``"auto"`` resolved for the model (``Preprocessing.impute``).
     columns : ColumnPlan
         The candidate and excluded columns.
+    selection : dict[str, Any]
+        The clusters of similar candidate columns and their representatives
+        in the fitted pipeline (``mloom.selection.describe_selection``).
     selected_columns : list[str]
         The candidate columns the fitted pipeline uses.
     best_params : dict[str, Any]
@@ -124,6 +127,7 @@ class Result:
     clip: dict[str, Any]
     impute: dict[str, Any]
     columns: ColumnPlan
+    selection: dict[str, Any]
     selected_columns: list[str]
     best_params: dict[str, Any]
     cv_scores: dict[str, Any]
@@ -165,6 +169,7 @@ class Result:
             "preprocessing": {"clip": self.clip, "impute": self.impute},
             "excluded_columns": [vars(column) for column in self.columns.excluded],
             "candidate_columns": self.columns.candidates,
+            "selection": self.selection,
             "selected_columns": self.selected_columns,
             "cv": self.cv,
             "hpo": self.hpo,

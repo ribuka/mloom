@@ -32,6 +32,7 @@ def test_repository_defaults_set_every_key() -> None:
             "sigma_k": 3.0,
         },
         "impute": {"method": "auto", "fill_value": 0.0, "n_neighbors": 5},
+        "selection": {"max_correlation": 0.9},
     }
 
 
@@ -115,6 +116,10 @@ def test_wheel_reads_the_packaged_defaults(monkeypatch: pytest.MonkeyPatch, tmp_
         ("[impute]\nfill_value = nan\n", "finite number"),
         ("[impute]\nn_neighbors = 0\n", "integer of 1 or more"),
         ("[impute]\nn_neighbors = 2.0\n", "integer of 1 or more"),
+        ("[selection]\nmax_correlation = -0.1\n", r"\[selection\] max_correlation .* from 0 to 1"),
+        ("[selection]\nmax_correlation = 1.5\n", "from 0 to 1"),
+        ('[selection]\nmax_correlation = "0.9"\n', "from 0 to 1"),
+        ("[selection]\nmax_correlation = true\n", "from 0 to 1"),
     ],
 )
 @pytest.mark.parametrize("layer", ["project", "local_defaults"])

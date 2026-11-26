@@ -61,7 +61,7 @@ uv run mloom show outputs/quality-lgbm/model.pkl
 ```
 
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
-- 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式を変えられます（下の「前処理」）。
+- 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式、似た列をまとめる相関のしきい値（`[selection] max_correlation`）を変えられます（下の「前処理」「特徴量選択」）。
 - `unavailable-sensors.json` と `mloom.toml` は、mloom を使う側のリポジトリの `config/` に置きます。
 
 ## 設定の既定値
@@ -96,6 +96,13 @@ uv run mloom show outputs/quality-lgbm/model.pkl
 | `[impute]` | 既定 `auto` | `none`、`median`、`mean`、`most_frequent`、`constant`、`knn`、`iterative`。`auto` は `ridge`・`pls` では `median`、`lightgbm`・`random_forest` では `none`（欠損のまま学習）です。`none` を `ridge`・`pls` で選ぶと終了コード 2 で止まります |
 
 - 使った値は記録の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。実際に使った補完の方式（`auto` を読み替えた後の値）は `preprocessing.impute.method` に残ります（`settings.impute.method` は設定に書いた値のまま）。
+
+## 特徴量選択
+
+候補列を目的変数との F 統計量（回帰は `f_regression`、分類は `f_classif`）で順位付けし、上位 `k` 列を使います。`k` はハイパーパラメータと同時に探索します。
+
+- スピアマンの |ρ| が `[selection] max_correlation`（既定 0.9）を超える列どうしはクラスタにまとめ、各クラスタからは代表 1 列（CV の分割ごとに、学習側で F 統計量が最大の列）だけを採用の候補にします。似た列の両方が採用されることはありません。`max_correlation = 1` にすると何もまとめません。
+- クラスタは記録の `selection` に残ります。`n_clusters` はクラスタの数、`clusters` は 2 列以上のクラスタごとの列（`columns`）、最終モデルの代表（`representative`）、その代表が採用されたか（`selected`）です。代表でない列も候補列のままで、前処理には使われます。
 
 ## Python API
 
