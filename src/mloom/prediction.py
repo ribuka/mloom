@@ -95,7 +95,9 @@ def predict(
         When the model or the data cannot be read, a column the model needs
         or a column of ``keep_columns`` is not in the data, a value of
         ``filters`` does not fit its column, a column of ``keep_columns``
-        has the name of an output column, the arguments of the confusion
+        has the name of an output column, two output columns would have
+        the same name (a selected column ``base`` with ``shap``, for
+        example), the arguments of the confusion
         matrix do not fit the model, or the data has the target but its
         ``time_column`` cannot be compared with the end of the training
         period.
@@ -108,7 +110,9 @@ def predict(
         confusion = classification_confusion(pipeline.classes_, *thresholds)
     else:
         confusion = regression_confusion(*thresholds)
-    _check_keep_columns(frame, keep_columns, _output_names(pipeline, confusion, shap=shap))
+    outputs = _output_names(pipeline, confusion, shap=shap)
+    _check_unique(outputs)
+    _check_keep_columns(frame, keep_columns, outputs)
     _require_columns(frame, candidate_columns(pipeline), "candidate column")
     passed = filter_mask(frame, bundle["filters"], "filters").to_numpy()
     predicted = _predictions(pipeline, frame, passed)
@@ -167,6 +171,16 @@ def _proba_names(pipeline: Pipeline) -> list[str]:
     if not is_classifier(pipeline):
         return []
     return [f"{PROBA_PREFIX}{label}" for label in pipeline.classes_]
+
+
+def _check_unique(outputs: list[str]) -> None:
+    # A selected column named "base" gives a second shap_base, and some names of classes and columns clash.
+    clashes = sorted({name for name in outputs if outputs.count(name) > 1})
+    if clashes:
+        raise InputError(
+            f"the output would have more than one column named {clashes}, from the names of the selected "
+            "columns or the classes of the model; rename them and train again, or predict without shap"
+        )
 
 
 def _check_keep_columns(frame: pl.DataFrame, keep_columns: Sequence[str], outputs: list[str]) -> None:

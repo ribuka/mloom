@@ -5,6 +5,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from datetime import UTC
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -492,19 +493,21 @@ def test_keep_columns_may_not_have_the_names_of_the_scores(
         predict(trained.model_bundle(), data.with_columns(pl.lit(0).alias(name)), keep_columns=(name,), **arguments)
 
 
-@pytest.mark.parametrize("kind", ["datetime ns", "datetime ns Asia/Tokyo", "string"])
+def _time_of_kind(kind: str) -> pl.Expr:
+    if kind == "string":
+        return pl.format("T{}", pl.col("t").cast(pl.String).str.zfill(3))
+    if kind == "decimal":
+        return pl.col("t").cast(pl.Decimal(10, 1))
+    time = pl.lit("2026-01-01").str.to_datetime(time_unit="ns") + pl.duration(microseconds=pl.col("t"), nanoseconds=500)
+    return time.dt.replace_time_zone("Asia/Tokyo") if kind.endswith("Tokyo") else time
+
+
+@pytest.mark.parametrize("kind", ["datetime ns", "datetime ns Asia/Tokyo", "string", "decimal"])
 def test_last_time_compares_the_rows_as_the_training_sorts_them(
     data: pl.DataFrame, make_config: Callable[..., Config], kind: str
 ) -> None:
     """The last row trained on is not scored, even with nanoseconds below the microseconds of ``last_time``."""
-    if kind == "string":
-        time = pl.format("T{}", pl.col("t").cast(pl.String).str.zfill(3))
-    else:
-        start = pl.lit("2026-01-01").str.to_datetime(time_unit="ns")
-        time = start + pl.duration(microseconds=pl.col("t"), nanoseconds=500)
-        if kind.endswith("Tokyo"):
-            time = time.dt.replace_time_zone("Asia/Tokyo")
-    table = data.with_columns(time=time)
+    table = data.with_columns(time=_time_of_kind(kind))
     config = make_config(
         cv="timeseries", time_column="time", train_filters=FIRST_HALF, exclude_columns=("y", "c", "t")
     )
@@ -512,11 +515,27 @@ def test_last_time_compares_the_rows_as_the_training_sorts_them(
     last_time = bundle["training_rows"]["last_time"]
     if kind == "string":
         assert last_time == "T059"
+    elif kind == "decimal":
+        assert last_time == Decimal("59.0")
     else:
         assert last_time.microsecond == 59
         assert last_time.tzinfo == (UTC if kind.endswith("Tokyo") else None)
-    output = predict(bundle, table)
-    assert output["error"].is_not_null().to_list() == ((table["t"] > 59) & table["y"].is_not_null()).to_list()
+    scored = ((table["t"] > 59) & table["y"].is_not_null()).to_list()
+    assert predict(bundle, table)["error"].is_not_null().to_list() == scored
+    if kind == "decimal":
+        # A number of another type is compared too.
+        as_float = table.with_columns(pl.col("time").cast(pl.Float64))
+        assert predict(bundle, as_float)["error"].is_not_null().to_list() == scored
+
+
+def test_selected_column_named_base_clashes_with_shap_base(data: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+    """A selected column ``base`` would give a second ``shap_base``: ``shap`` raises ``InputError``, the rest predicts."""
+    table = data.rename({"s0": "base"})
+    result = optimize_model(table, make_config())
+    assert "base" in result.selected_columns
+    with pytest.raises(InputError, match=r"more than one column named \['shap_base'\]"):
+        predict(result.model_bundle(), table, shap=True)
+    assert predict(result.model_bundle(), table)["prediction"].is_not_nan().all()
 
 
 @pytest.mark.parametrize(

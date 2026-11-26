@@ -8,6 +8,7 @@ day, and datetimes by microsecond, as the row hashes read them
 """
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import numpy as np
 import polars as pl
@@ -15,7 +16,7 @@ import polars as pl
 from mloom.dtypes import BOOLEAN, DATE, DATETIME, NUMBER, STRING, value_kind
 from mloom.errors import InputError
 
-TimeValue = datetime | date | int | float | bool | str
+TimeValue = datetime | date | int | float | Decimal | bool | str
 
 
 def last_time(rows: pl.DataFrame, time_column: str | None) -> TimeValue | None:
@@ -104,6 +105,6 @@ def _same_kind(dtype: pl.DataType, latest: TimeValue) -> bool:
         return kind == DATE
     if isinstance(latest, bool):
         return kind == BOOLEAN
-    if isinstance(latest, int | float):
+    if isinstance(latest, int | float | Decimal):
         return kind == NUMBER
     return kind == STRING
