@@ -764,23 +764,50 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 
 ## Skill
 
-- 本リポジトリの `skills/model-optimization/SKILL.md` に置く（2026-11-26 たたき台を作成）。
+- 本リポジトリの `skills/model-optimization/SKILL.md` に置く（2026-11-26 たたき台を作成。同日 Issue #7 で、配布と実行、`--filters`、`mloom predict`、前処理の設定に合わせて書き直した）。
 - 5 つの入力のうち足りないものはユーザーに聞く。CV の方法は Skill が推測して決めず、知っている列名を材料に聞き返す。
-- 役割は 2 つだけ: ユーザーの指定を CLI の引数に変換して実行する、`run.json` を読んで結果を説明する（採用した列、除外した列と理由、スコア、最良のパラメータ）。
-- どの列を除外するか、どう評価するか、何を保存するかを Skill で決めない。それらは Python 側で固定する。
+- 役割は 2 つだけ: ユーザーの指定を CLI（`mloom optimize`・`mloom predict`）の引数に変換して実行する、結果（`run.json` と予測の出力）を読んで説明する。
+- どの列を除外するか、どう評価するか、探索空間、前処理の方式、何を保存するかを Skill で決めない。それらは Python 側で固定する。スコアや指標も Skill で計算せず、mloom が出した値を伝える。
 
-### 配布と実行（未実装）
+Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 
-決定事項（2026-11-26 ユーザー判断。未決 12・13）:
+- フィルタ: ユーザーが行の条件（期間、運転条件、文字列を含むかどうかなど）を示したときだけ、`--filters` の JSON ファイルを作る。条件を、ユーザーが示したもの以外に足したり、推測で補ったりしない。
+  - 予測でも効く条件か、学習だけの条件か（`filters` か `train_filters` か）が示されていなければ、ユーザーに聞く。予測の結果が変わるので、Skill が決めてはいけないため。
+  - ファイルは `<output>/filters.json` に書き、`--output` のディレクトリが無ければ作る。モデルと一緒に残り、利用側の `config/` を Skill が書き換えずに済むため。
+- 予測: ユーザーが予測を頼んだときに `mloom predict` を実行する。`--output` は、ユーザーが示さなければ `<model.pkl のディレクトリ>/predictions.parquet` にする（`mloom optimize` の `--output` を `outputs/<target>-<model>-<cv>` にするのと同じく、Skill が引数を作るための既定）。
+  - 混同行列の閾値・陽性の向き・陽性のクラスは、ユーザーが示したときだけ渡す。一部だけ示されたら、残りを聞く。
+  - `--shap` は、ユーザーが寄与を頼んだときだけ付ける。`--keep-columns` は、ユーザーが示した列だけ。
+- 設定: 利用側の `config/mloom.toml`（`max_missing_rate`・`use_unlabeled_rows`・`[clip]`・`[impute]`）と `config/unavailable-sensors.json` を、ユーザーに頼まれない限り書き換えない。頼まれたときも、ユーザーが示したキーを、示した値にするだけ。
+
+### 配布と実行
+
+決定事項（2026-11-26 ユーザー判断。未決 12・13。2026-11-26 Issue #7 で `SKILL.md` と README の「導入」に実装）:
 
 - mloom は PC に 1 つ、利用側リポジトリとは別の場所に clone する。利用側リポジトリには mloom を入れない。
 - Skill は、各ベンダー（Claude Code など）の既定の Skill の置き場所に、clone の `skills/model-optimization` を指すジャンクションを置いて配る。`git pull` すれば、mloom と Skill が同じ版に揃う。
-- Skill は、利用側リポジトリの直下で `uv run --project <clone> mloom optimize ...` を実行する。
+- Skill は、利用側リポジトリの直下で `uv run --project <clone> mloom optimize ...`（予測は `mloom predict ...`）を実行する。
   - `--project` は使う環境（clone の `.venv` と `uv.lock`）を決めるだけで、カレントディレクトリは利用側リポジトリのまま。利用側の `config/mloom.toml`・`config/unavailable-sensors.json`・データ・出力先は、利用側の相対パスで指定できる。
   - mloom の `uv.lock` の版で動くので、予測する環境の scikit-learn などの版を揃えやすい。
   - mloom は clone から動くので、`config/mloom.local.toml` も読まれる（「設定ファイル」）。
-- `<clone>` は、Skill のディレクトリ（ジャンクション）の実際のパスから 2 つ上のディレクトリとする。ジャンクションのパスのまま `..\..` をたどると、clone ではなくジャンクションを置いた場所の親に着くので、先に実際のパスを調べる（PowerShell の `(Get-Item <Skillのディレクトリ>).Target` など。手順は案）。
-- リポジトリ全体をジャンクションにする形は採らない（案）。`SKILL.md` が `skills/model-optimization/` の 2 段下にあり、`<置き場所>/<名前>/SKILL.md` の 1 段下しか探さないベンダーでは見つからないため（Claude Code はそう理解している。ほかのベンダーは未確認）。
+- `<clone>` は、Skill のディレクトリ（ジャンクション）の実際のパスから 2 つ上のディレクトリとする。ジャンクションのパスのまま `..\..` をたどると、clone ではなくジャンクションを置いた場所の親に着くので、先に実際のパスを調べる。
+  - [auto] 手順（2026-11-26 Issue #7 で決定。Python を呼ばずに済むため）: PowerShell の `(Get-Item -LiteralPath <Skillのディレクトリ>).Target` の先頭の値を実際のパスとし、値が無ければ（ジャンクションでなければ）Skill のディレクトリそのもの（`FullName`）を実際のパスとする。末尾の `\` を除いてから 2 つ上をとる。
+  - `<clone>` に `pyproject.toml` と `config/mloom.toml` が無ければ、実行せずに、ジャンクションの置き方の誤りとしてユーザーに伝える。
+  - `.Target` の型は、Windows PowerShell 5.1 では `String[]`、PowerShell 7 では `String`（2026-11-26 確認）。`@(...)[0]` でどちらも先頭の値になる。
+  - 2026-11-26 に、Windows PowerShell 5.1 と PowerShell 7 の両方で、ジャンクションと、ジャンクションでない `skills/model-optimization` のどちらからも、末尾の区切りの有無や `/` 区切りによらず、clone のルートの絶対パスが求まることを確かめた（`tmp/` の使い捨てのディレクトリ）。
+- リポジトリ全体をジャンクションにする形は採らない。Claude Code は `<置き場所>/<名前>/SKILL.md` の 1 段下を探す（下の「確かめたこと」）ので、`skills/model-optimization/` の 2 段下にある `SKILL.md` が見つからないため。Skill のディレクトリのジャンクションなら、どちらのベンダーでも見つかる。
+
+確かめたこと（2026-11-26 Issue #7）:
+
+| ベンダー | 置き場所（ユーザー単位） | 深さ | ジャンクション | 出典 |
+| --- | --- | --- | --- | --- |
+| Claude Code | `~/.claude/skills/<名前>/SKILL.md`（プロジェクトでは `.claude/skills/<名前>/SKILL.md`） | 1 段（`<名前>/SKILL.md`）。ドキュメントに、それより深い場所を探す記述は無い | ドキュメントでは「`<名前>` はほかの場所のディレクトリへのシンボリックリンクでもよい」。この PC では、`~/.claude/skills/<名前>` のジャンクション（例: `pr-cross-review`）の Skill が、Claude Code のセッションの Skill の一覧に出る | https://code.claude.com/docs/en/skills 、この PC の `~/.claude/skills` |
+| Codex | `~/.agents/skills`（リポジトリでは `.agents/skills`。`~/.codex/skills` はドキュメントに無い） | 置き場所の下を再帰的に探す。この PC で、`.agents/skills/nest/deep-probe-skill/SKILL.md`（2 段下）が一覧に出た | ジャンクションをたどる。`.agents/skills/model-optimization` のジャンクションの `SKILL.md` と、`skills/` 全体を指すジャンクションの下の `model-optimization/SKILL.md` が、どちらも一覧に出た | https://developers.openai.com/codex/skills （2026-11-26 時点で https://learn.chatgpt.com/docs/build-skills に転送）、この PC の codex-cli 0.172.0 の `codex debug prompt-input`（モデルを呼ばずに、モデルに渡す Skill の一覧を出す） |
+
+- ジャンクションを作るコマンド（README の「導入」）:
+  - Claude Code: `New-Item -ItemType Junction -Path "$HOME\.claude\skills\model-optimization" -Target "<clone>\skills\model-optimization"`
+  - Codex: `New-Item -ItemType Junction -Path "$HOME\.agents\skills\model-optimization" -Target "<clone>\skills\model-optimization"`
+- Claude Code の深さは、ドキュメントの記述と、この PC の 1 段のジャンクションで確かめた。2 段下に置いた `SKILL.md` が見つからないことは、Claude Code のセッションを別に起こさないと確かめられないので、試していない。1 段のジャンクションなら、どちらにしても見つかる。
+- 2026-11-26 に、`tmp/` に偽の利用側リポジトリ（サンプルデータ、`config/mloom.toml`、`config/unavailable-sensors.json`、`<output>/filters.json`）を作り、clone に `config/mloom.local.toml` を置いて、その直下で `SKILL.md` のテンプレートどおりに `uv run --project <clone> mloom optimize ... --filters ...` と `mloom predict ...`（回帰で `--shap` と混同行列、分類で `--positive-class`）を実行した。どれも終了コード 0 で、出力は偽の利用側リポジトリの中にでき、`run.json` の `settings.files` の `project` は利用側の `config\mloom.toml`（カレントディレクトリからの相対パス）、`local_defaults`・`defaults` は clone のファイル、`unavailable_sensors.path` は利用側の `config\unavailable-sensors.json` だった。予測の出力の列は `SKILL.md` の表と一致した。
 
 ## 非機能要件（案）
 
@@ -881,3 +908,4 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 - 説明変数に無限大がある行も、学習から外されず、予測でも値が返る（2026-11-26 テストで確認）。
 - クリップと補完のそれぞれの方式で、学習と予測ができる（2026-11-26 テストで確認）。
 - 上の 4 つのモデルは、`lightgbm` を `hist_gradient_boosting` に置き換えたもので確かめる（2026-11-26 テストで確認）。
+- ジャンクションで配った Skill の手順で clone の場所が求まり、利用側リポジトリの直下から `uv run --project <clone>` で `mloom optimize` と `mloom predict` を実行できる（2026-11-26 Issue #7 で `tmp/` の偽の clone の置き場所と利用側リポジトリで確認。実際の Claude Code のセッションからの実行は未確認で、merge 後にユーザーが確かめる）。
