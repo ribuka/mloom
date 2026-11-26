@@ -20,6 +20,22 @@ Params = dict[str, Any]
 K_PARAM = "k"
 
 
+def model_params(params: Params) -> Params:
+    """Leave out the parameters of the feature selection, keeping those of the model.
+
+    Parameters
+    ----------
+    params : Params
+        Parameters of a trial or of ``best_params``.
+
+    Returns
+    -------
+    Params
+        The hyperparameters of the model, without ``k``.
+    """
+    return {name: value for name, value in params.items() if name != K_PARAM}
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """A model of the registry.

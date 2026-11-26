@@ -19,7 +19,7 @@ from mloom.columns import ColumnPlan
 from mloom.config import Config
 from mloom.errors import InputError
 from mloom.model_file import MODEL_FILE, read_run
-from mloom.models import K_PARAM
+from mloom.models import K_PARAM, model_params
 from mloom.settings import Settings, settings_from_record
 
 _NONE = type(None)
@@ -123,7 +123,7 @@ def _base(path: str | Path, record: dict[str, Any]) -> Base:
     if k < 1:
         raise InputError(f"best_params.{K_PARAM} must be 1 or more; got {k}")
     try:
-        config.model_spec.check_params({name: value for name, value in best_params.items() if name != K_PARAM})
+        config.model_spec.check_params(model_params(best_params))
     except InputError as error:
         raise InputError(f"best_params does not fit: {error}") from error
     # Copied to the record of the refit.

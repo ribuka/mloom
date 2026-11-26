@@ -16,7 +16,7 @@ from mloom.data import Data
 from mloom.errors import InputError
 from mloom.filters import Condition
 from mloom.fixed_cv import fixed_fold_models, fixed_fold_scores
-from mloom.models import K_PARAM
+from mloom.models import K_PARAM, model_params
 from mloom.pipeline import fit_preprocess
 from mloom.result import Result
 from mloom.settings import load_settings
@@ -86,7 +86,7 @@ def refit_model(
     training = prepare_training(data, config, load_settings(config.settings), lambda plan: _keep(base, plan))
     keep, dropped = _keep(base, training.columns)
     warn_dropped(dropped)
-    params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
+    params = model_params(base.best_params)
     fold_models = fixed_fold_models(config, params, training.preprocessing, keep, training)
     return fit_final(
         config,

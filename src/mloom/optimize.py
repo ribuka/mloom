@@ -23,7 +23,7 @@ from mloom.data import Data
 from mloom.errors import OptimizationError
 from mloom.fixed_cv import fixed_fold_models, fixed_fold_scores
 from mloom.interpretation import FoldModels, importance_groups
-from mloom.models import K_PARAM, Params
+from mloom.models import K_PARAM, Params, model_params
 from mloom.pipeline import (
     Preprocessing,
     build_pipeline,
@@ -103,7 +103,7 @@ def optimize_model(data: Data, config: Config, *, base: Base | None = None) -> R
     study, prepared = _search(config, training, clusters, first)
     best = study.best_trial
     k = best.params[K_PARAM]
-    params = {name: value for name, value in best.params.items() if name != K_PARAM}
+    params = model_params(best.params)
     preprocess = fit_preprocess(training.preprocessing, training.x_statistics)
     ranking = rank_columns(config.task, preprocess, training.x, training.y, training.x_statistics, clusters)
     keep = top_columns(ranking, k)
@@ -147,7 +147,7 @@ def _score_base(base: Base, config: Config, training: TrainingData) -> _BaseScor
     not_compared = [reason for reason, differ in differs.items() if differ]
     if not_compared:
         return _BaseScores(dropped, None, not_compared)
-    params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
+    params = model_params(base.best_params)
     preprocessing = plan_preprocessing(base.config, base.settings)
     models = fixed_fold_models(base.config, params, preprocessing, keep, training)
     return _BaseScores(dropped, fixed_fold_scores(models, training), [])
@@ -157,7 +157,7 @@ def _first_trial(base: Base, config: Config, n_clusters: int) -> Params | None:
     # The parameters of the base, when they are in the search space of this run, with k kept within its range.
     if config.model != base.config.model:
         return None
-    params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
+    params = model_params(base.best_params)
     space = _search_space(config, n_clusters)
     outside = sorted(
         name for name in params.keys() | space.keys() if name not in space or not _contains(space[name], params.get(name))
