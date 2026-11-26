@@ -511,7 +511,7 @@ n_repeats = 5
 
 - 1σ あたりの係数（`per_std`）: 推定器への入力（標準化した後の値）で、採用した列を 1 だけ動かしたときの出力の変化。線形の SHAP（「SHAP の寄与」）と同じく、`shap_background` の点と、そこから列ごとに 1 だけ動かした点での出力の差で求める（`mloom.explain.linear_weights` を共通に使う）。推定器ごとの係数の持ち方（`PLSRegression` の中心化など）に依らないため。出力は、回帰は `predict`、分類（`LogisticRegression`）は `decision_function`（対数オッズ）。
 - 元の単位あたりの係数（`per_unit`）: `per_std / σ`。σ は前処理の `scale` の段（`StandardScaler`）の `scale_` のうち、その列の値。
-- 分類: 2 値は `classes_[1]` の対数オッズについて出し、`class` は `null`（SHAP と同じ）。多値はクラスごとに出し、`class` は `str()` にしたクラス。
+- 分類: 2 値は `classes_[1]` の対数オッズについて出し（SHAP と同じ）、`class` は `str(classes_[1])`。多値はクラスごとに出し、`class` は `str()` にしたクラス。回帰の `class` は `null`。記録だけから、どのクラスの対数オッズかが分かるようにするため（2026-11-26 実装。クロスレビューの指摘で、2 値も `null` にしていたのを直した）。
 - 係数は、クリップの上下限の中で、ほかの列を固定したときの変化。上下限の外では、元の値を動かしても出力は変わらない。
 - 並べ方: クラスごとに（`classes_` の順）、`abs(per_std)` の降順。同じ値なら `selected_columns` の順。
 - 木のモデル（`random_forest`・`lightgbm`）では `coefficients` を `null` にする。
@@ -521,6 +521,7 @@ n_repeats = 5
 - `PLSRegression` の `x_weights_`（W、列 × 成分）と `y_loadings_`（q、1 × 成分）を使う。成分の得点 T は、最終モデルの学習に使った行の推定器への入力（`estimator_input`）を推定器の `transform` に通した値（`x_scores_` の有無に依らないため）。
 - 成分 a の説明量 `SS_a = q_a² · (T_aᵀ T_a)`。列 j の VIP = `sqrt(p · Σ_a SS_a · (W_ja / ‖W_a‖)² / Σ_a SS_a)`。p は採用した列の数。
 - `Σ_a SS_a` が 0 のときは、すべての列の `vip` を `null` にする（記録に NaN を書かないため）。
+- 目的変数を成分数より前に説明し切ると、残りの成分の `x_weights_` は 0 になる（`‖W_a‖ = 0`）。その成分の `(W_ja / ‖W_a‖)²` は 0 として扱う（2026-11-26 実装。クロスレビューの指摘）。そのままでは `0 / 0` の NaN が `SS_a = 0` を掛けても残り、すべての列の VIP が NaN になるため。`[(-1,-1), (-1,1), (1,-1), (1,1)]` を 4 回繰り返した 2 列と `y = 1 列目` を `n_components = 2` で学習すると、2 つ目の成分の重みが 0 になり、VIP は 1 列目が √2、2 列目が 0 になることを確かめた（`tests/test_interpretation.py`）。
 - 並べ方: `vip` の降順。同じ値なら `selected_columns` の順。`pls` 以外では `vip` を `null` にする。
 
 2026-11-26 にテストで確かめたこと（`tests/test_interpretation.py`。scikit-learn 1.9.1、lightgbm 4.7.0）:

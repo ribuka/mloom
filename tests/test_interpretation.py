@@ -12,8 +12,10 @@ import pytest
 import mloom.interpretation
 import mloom.optimize
 from mloom import Config, optimize_model
-from mloom.interpretation import Importance
+from mloom.interpretation import Importance, pls_vip
 from mloom.models import MODELS
+from mloom.pipeline import build_pipeline, fit_preprocess, plan_preprocessing, to_matrix
+from mloom.settings import load_settings
 
 N_ROWS = 150
 
@@ -164,7 +166,8 @@ def test_coefficients_are_the_change_of_the_output(
     coefficients = result.interpretation["coefficients"]
     assert coefficients["output"] == ("prediction" if task == "regression" else "log_odds")
     output = pipeline.decision_function if task == "classification" else pipeline.predict
-    classes = [str(label) for label in pipeline.classes_] if target == "c3" else [None]
+    # The output of 2 classes is that of classes_[1]; a regression has one output without a class.
+    classes = [str(label) for label in pipeline.classes_[-1 if target == "c2" else 0 :]] if task == "classification" else [None]
     scaler = pipeline.named_steps["preprocess"].estimator.named_steps["scale"]
     candidates = result.columns.candidates
     row = scaled[:1]
@@ -175,7 +178,7 @@ def test_coefficients_are_the_change_of_the_output(
     for entry in coefficients["columns"]:
         changed = row.with_columns(pl.col(entry["column"]) + 1.0)
         after = np.asarray(output(changed), dtype=np.float64).reshape(-1)
-        index = 0 if entry["class"] is None else classes.index(entry["class"])
+        index = classes.index(entry["class"])
         assert after[index] - before[index] == pytest.approx(entry["per_unit"], rel=1e-9)
         sigma = scaler.scale_[candidates.index(entry["column"])]
         assert entry["per_std"] == pytest.approx(entry["per_unit"] * sigma, rel=1e-12)
@@ -193,3 +196,18 @@ def test_vip_follows_its_definition(scaled: pl.DataFrame, make_config: Callable[
     assert sum(value**2 for value in values) == pytest.approx(len(result.selected_columns), rel=1e-9)
     assert vip[0]["column"] == "a"
     assert values == sorted(values, reverse=True)
+
+
+@pytest.mark.filterwarnings("ignore:y residual is constant:UserWarning")
+def test_vip_ignores_components_left_with_no_weights(make_config: Callable[..., Config]) -> None:
+    """A component after the target is fully explained has zero weights, and the VIP stays finite."""
+    points = np.array([(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] * 4)
+    frame = pl.DataFrame({"p": points[:, 0], "q": points[:, 1], "y": points[:, 0]})
+    config = make_config(model="pls", exclude_columns=("y",))
+    preprocess = fit_preprocess(plan_preprocessing(config, load_settings(None)), to_matrix(frame, ["p", "q"]))
+    pipeline = build_pipeline(config, {"n_components": 2}, preprocess, [0, 1], ["p", "q"])
+    pipeline.fit(frame, frame["y"].to_numpy())
+    assert np.linalg.norm(pipeline[-1].x_weights_[:, 1]) == 0
+    vip = pls_vip(pipeline, frame)
+    assert vip == {"columns": [{"column": "p", "vip": pytest.approx(np.sqrt(2), rel=1e-12)}, {"column": "q", "vip": 0.0}]}
+    json.dumps(vip, allow_nan=False)

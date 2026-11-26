@@ -183,8 +183,9 @@ def linear_coefficients(pipeline: Pipeline, background: np.ndarray) -> dict[str,
     dict[str, Any] | None
         ``None`` for the tree models. Otherwise the ``output``
         (``"prediction"`` or ``"log_odds"``) and, for each ``class``
-        (``None`` for regression and for 2 classes, where the log odds are
-        those of ``classes_[1]``; ``str`` of each class otherwise) and each
+        (``None`` for regression; ``str`` of ``classes_[1]`` for 2 classes,
+        whose log odds are those of ``classes_[1]``; ``str`` of each class
+        otherwise) and each
         selected ``column``, the change of the output when the column moves
         by 1 in its original unit (``per_unit``) and by 1 standard deviation
         (``per_std``). Within a class, the largest ``abs(per_std)`` comes
@@ -198,7 +199,8 @@ def linear_coefficients(pipeline: Pipeline, background: np.ndarray) -> dict[str,
     scale = pipeline.named_steps["preprocess"].estimator.named_steps["scale"].scale_[keep]
     names = selected_columns(pipeline)
     classifier = is_classifier(estimator)
-    classes = [str(label) for label in estimator.classes_] if classifier and weights.shape[1] > 1 else [None]
+    # One output for regression and for 2 classes (those of classes_[1]), one for each class otherwise.
+    classes = [str(label) for label in estimator.classes_[-weights.shape[1] :]] if classifier else [None]
     described = []
     for output, label in enumerate(classes):
         order = np.argsort(-np.abs(weights[:, output]), kind="stable")
@@ -241,7 +243,9 @@ def pls_vip(pipeline: Pipeline, rows: pl.DataFrame) -> dict[str, Any] | None:
     total = float(np.sum(explained))
     if total == 0:
         return {"columns": [{"column": name, "vip": None} for name in names]}
-    shares = (weights / np.linalg.norm(weights, axis=0)) ** 2
+    norms = np.linalg.norm(weights, axis=0)
+    # A component left after the target is fully explained has zero weights; it adds nothing.
+    shares = np.divide(weights, norms, out=np.zeros_like(weights), where=norms > 0) ** 2
     vip = np.sqrt(len(names) * (shares @ explained) / total)
     order = np.argsort(-vip, kind="stable")
     return {"columns": [{"column": names[j], "vip": float(vip[j])} for j in order]}
