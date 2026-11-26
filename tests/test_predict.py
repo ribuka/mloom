@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 import pytest
+from lightgbm import LGBMClassifier
 from sklearn.base import is_classifier
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
@@ -107,7 +108,7 @@ def test_used_for_training_marks_exactly_the_rows_trained_on(data: pl.DataFrame,
     assert not output.tail(9)["used_for_training"].any()
 
 
-@pytest.mark.parametrize("model", ["ridge", "hist_gradient_boosting"])
+@pytest.mark.parametrize("model", ["ridge", "lightgbm"])
 def test_rows_with_infinite_features_are_predicted(
     data: pl.DataFrame, make_config: Callable[..., Config], model: str
 ) -> None:
@@ -209,7 +210,7 @@ np.save(sys.argv[3], bundle["pipeline"].predict(pl.read_parquet(sys.argv[2])))
         ("ridge", "regression", "y", ""),
         ("random_forest", "classification", "c", ""),
         ("ridge", "regression", "y", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'knn'\n"),
-        ("hist_gradient_boosting", "classification", "c", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'iterative'\n"),
+        ("lightgbm", "classification", "c", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'iterative'\n"),
     ],
 )
 def test_model_pkl_is_read_and_predicts_without_mloom(
@@ -566,29 +567,46 @@ def _model_output(estimator: Any, x: np.ndarray) -> np.ndarray:  # noqa: ANN401 
     if isinstance(estimator, RandomForestClassifier):
         output = estimator.predict_proba(x)
         return output[:, 1:] if output.shape[1] == 2 else output
+    if isinstance(estimator, LGBMClassifier):  # no decision_function
+        return np.asarray(estimator.predict(x, raw_score=True)).reshape(len(x), -1)
     return np.asarray(estimator.decision_function(x)).reshape(len(x), -1)
 
 
+def _with_missing_sensors(table: pl.DataFrame) -> pl.DataFrame:
+    """Make 10% of each sensor missing, on different rows for each sensor."""
+    return table.with_columns(
+        pl.when(pl.col("t") % 10 == index + 1).then(None).otherwise(pl.col(f"s{index}")).alias(f"s{index}")
+        for index in range(6)
+    )
+
+
 @pytest.mark.parametrize(
-    ("model", "task", "n_classes"),
+    ("model", "task", "n_classes", "missing"),
     [
-        ("ridge", "regression", 0),
-        ("pls", "regression", 0),
-        ("random_forest", "regression", 0),
-        ("hist_gradient_boosting", "regression", 0),
-        ("ridge", "classification", 2),
-        ("random_forest", "classification", 2),
-        ("hist_gradient_boosting", "classification", 2),
-        ("ridge", "classification", 3),
-        ("random_forest", "classification", 3),
-        ("hist_gradient_boosting", "classification", 3),
+        ("ridge", "regression", 0, False),
+        ("pls", "regression", 0, False),
+        ("random_forest", "regression", 0, False),
+        ("lightgbm", "regression", 0, False),
+        ("ridge", "classification", 2, False),
+        ("random_forest", "classification", 2, False),
+        ("lightgbm", "classification", 2, False),
+        ("ridge", "classification", 3, False),
+        ("random_forest", "classification", 3, False),
+        ("lightgbm", "classification", 3, False),
+        ("lightgbm", "regression", 0, True),
+        ("lightgbm", "classification", 2, True),
+        ("lightgbm", "classification", 3, True),
     ],
 )
 def test_shap_contributions_add_up_to_the_output(
-    data: pl.DataFrame, make_config: Callable[..., Config], model: str, task: str, n_classes: int
+    data: pl.DataFrame, make_config: Callable[..., Config], model: str, task: str, n_classes: int, missing: bool
 ) -> None:
-    """``shap_base`` plus the contributions is the output of the model, for each selected column and class."""
+    """``shap_base`` plus the contributions is the output of the model, for each selected column and class.
+
+    With ``missing``, the sensors have missing values that the default imputation (``none``) leaves to the model.
+    """
     table = data.with_columns(c=_three_classes()) if n_classes == 3 else data
+    table = _with_missing_sensors(table) if missing else table
     target = "y" if task == "regression" else "c"
     result = optimize_model(table, make_config(model=model, task=task, target=target, filters=FILTERS))
     output = predict(result.model_bundle(), table, shap=True)
@@ -609,7 +627,13 @@ def test_shap_contributions_add_up_to_the_output(
     passed = _passed(table)
     assert all(output.filter(~passed)[name].is_nan().all() for name in names)
     rows = output.filter(passed)
-    expected = _model_output(result.pipeline[-1], estimator_input(result.pipeline, table.filter(passed)))
+    x = estimator_input(result.pipeline, table.filter(passed))
+    # The rows outside the filters are NaN; the others are predicted, also with missing features left as they are.
+    assert np.isnan(x).any() == missing
+    prediction = rows["prediction"]
+    assert prediction.null_count() == 0
+    assert not (prediction.dtype.is_float() and prediction.is_nan().any())
+    expected = _model_output(result.pipeline[-1], x)
     width = len(selected) + 1
     for index in range(len(classes)):
         total = rows.select(names[index * width : (index + 1) * width]).to_numpy().sum(axis=1)

@@ -9,6 +9,7 @@ description = "Feature selection and hyperparameter optimization of a user-chose
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "lightgbm>=4.7.0",
     "numpy>=2.5.5",
     "optuna>=5.1.0",
     "polars>=2.2.0",

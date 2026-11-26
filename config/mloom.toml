@@ -35,7 +35,7 @@ sigma_k = 3.0
 [impute]
 # How missing features (and +inf, -inf) are filled: auto, none, median, mean, most_frequent,
 # constant, knn or iterative. auto is median for ridge and pls, and none for
-# hist_gradient_boosting and random_forest. none is an error with ridge and pls.
+# lightgbm and random_forest. none is an error with ridge and pls.
 method = "auto"
 # constant: the value that fills. A number.
 fill_value = 0.0

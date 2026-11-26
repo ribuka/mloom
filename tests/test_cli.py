@@ -2,6 +2,7 @@
 
 import json
 import pickle
+from importlib.metadata import version
 from pathlib import Path
 
 import polars as pl
@@ -59,6 +60,7 @@ def test_optimize_saves_and_prints_model_pkl(
     assert run["unavailable_sensors"]["found"]
     assert "s0" not in run["candidate_columns"]
     assert run["settings"]["columns"]["max_missing_rate"] == 0.3
+    assert run["versions"]["lightgbm"] == version("lightgbm")
 
     assert main(["show", str(model_path)]) == EXIT_OK
     shown = capsys.readouterr().out
@@ -89,11 +91,14 @@ def test_no_imputation_with_ridge_exits_with_2_before_training(
     assert not (tmp_path / "out").exists()
 
 
-def test_invalid_arguments_exit_with_2(data_path: Path, tmp_path: Path) -> None:
+# The removed gradient boosting, joined so that it does not remain in the sources.
+@pytest.mark.parametrize("model", ["svm", "hist_gradient" + "_boosting"])
+def test_invalid_arguments_exit_with_2(data_path: Path, tmp_path: Path, model: str) -> None:
     """An argument outside its choices exits with code 2 (argparse)."""
     with pytest.raises(SystemExit) as raised:
-        main(_args(data_path, tmp_path / "out", "--model", "svm"))
+        main(_args(data_path, tmp_path / "out", "--model", model))
     assert raised.value.code == EXIT_INPUT
+    assert not (tmp_path / "out").exists()
 
 
 @pytest.fixture

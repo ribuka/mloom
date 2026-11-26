@@ -23,7 +23,7 @@ from mloom.sensors import UnavailableSensors
 from mloom.settings import Settings
 from mloom.training_period import TimeValue
 
-_PACKAGES = ("mloom", "scikit-learn", "optuna", "polars", "numpy", "scipy")
+_PACKAGES = ("mloom", "scikit-learn", "lightgbm", "optuna", "polars", "numpy", "scipy")
 
 
 @dataclass(frozen=True)

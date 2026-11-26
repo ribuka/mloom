@@ -9,23 +9,20 @@ rows trained on (``shap_background``). shap is imported only when the
 contributions are computed.
 """
 
+import warnings
 from typing import Any
 
 import numpy as np
 import polars as pl
+from lightgbm import LGBMClassifier, LGBMRegressor
 from sklearn.base import is_classifier
-from sklearn.ensemble import (
-    HistGradientBoostingClassifier,
-    HistGradientBoostingRegressor,
-    RandomForestClassifier,
-    RandomForestRegressor,
-)
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.pipeline import Pipeline
 
 from mloom.pipeline import estimator_input, selected_columns
 
 SHAP_PREFIX = "shap_"
-_TREES = (HistGradientBoostingClassifier, HistGradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor)
+_TREES = (LGBMClassifier, LGBMRegressor, RandomForestClassifier, RandomForestRegressor)
 
 
 def shap_background(pipeline: Pipeline, rows: pl.DataFrame) -> np.ndarray:
@@ -99,9 +96,9 @@ def shap_columns(
     list[pl.Series]
         The columns of ``shap_names``. Their sum over a class (the base and
         the contributions) is the output of the model: the prediction for
-        regression; for classification, the log odds
-        (``decision_function``) of ``HistGradientBoostingClassifier`` and
-        ``LogisticRegression``, and the probability of
+        regression; for classification, the log odds of ``LGBMClassifier``
+        (``predict(x, raw_score=True)``) and of ``LogisticRegression``
+        (``decision_function``), and the probability of
         ``RandomForestClassifier``. For 2 classes, they are those of
         ``classes_[1]``.
     """
@@ -129,7 +126,10 @@ def _tree(estimator: Any, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:  # no
     import shap
 
     explainer = shap.TreeExplainer(estimator)
-    contributions = np.asarray(explainer.shap_values(x), dtype=np.float64)
+    with warnings.catch_warnings():
+        # shap warns of a list for a 2-class LGBMClassifier, but returns one (rows, columns) array.
+        warnings.filterwarnings("ignore", "LightGBM binary classifier with TreeExplainer", UserWarning)
+        contributions = np.asarray(explainer.shap_values(x), dtype=np.float64)
     base = np.atleast_1d(np.asarray(explainer.expected_value, dtype=np.float64))
     if contributions.ndim == 2:
         contributions = contributions[:, :, None]
