@@ -1,6 +1,7 @@
 """Tests of the row filters: their checks and what each op keeps."""
 
 from pathlib import Path
+from typing import Literal
 
 import polars as pl
 import pytest
@@ -220,3 +221,23 @@ def test_invalid_filters_file_raises(tmp_path: Path, content: str | None, messag
     with pytest.raises(InputError, match=message):
         load_filters(path)
 
+
+
+def test_nanoseconds_of_the_value_are_kept() -> None:
+    """A ``Datetime("ns")`` column compares with the nanoseconds of the value (``fromisoformat`` drops them)."""
+    nanos = pl.Series("t", [1, 0, 1_500]).cast(pl.Datetime("ns"))
+    data = pl.DataFrame({"t": nanos, "z": nanos.dt.replace_time_zone("UTC").dt.convert_time_zone("Asia/Tokyo")})
+    assert _kept(data, {"column": "t", "op": "eq", "value": "1970-01-01T00:00:00.000000001"}) == [True, False, False]
+    assert _kept(data, {"column": "t", "op": "ge", "value": "1970-01-01T00:00:00,0000015"}) == [False, False, True]
+    assert _kept(data, {"column": "z", "op": "eq", "value": "1970-01-01T09:00:00.000000001+09:00"}) == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("unit", "value"),
+    [("ms", "2026-10-01T00:00:00.0015"), ("us", "2026-10-01T00:00:00.0000001"), ("ns", "2026-10-01T00:00:00.0000000001")],
+)
+def test_value_finer_than_the_time_unit_raises(unit: Literal["ns", "us", "ms"], value: str) -> None:
+    """A value that the time unit of the column cannot hold raises ``InputError`` instead of being truncated."""
+    data = pl.DataFrame({"t": pl.Series([0]).cast(pl.Datetime(unit))})
+    with pytest.raises(InputError, match=f"finer than the time unit {unit}"):
+        _kept(data, {"column": "t", "op": "ge", "value": value})

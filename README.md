@@ -89,7 +89,7 @@ predictions = mloom.predict("outputs/quality-ridge/model.pkl", "data/new.parquet
 - 入力と同じ行数・同じ順で、`--keep-columns` の列、`prediction`、`passed_filter`、`used_for_training`、分類では `proba_<クラス>` を返します。
 - `filters` の条件を満たさない行は予測せず、`prediction` を NaN（分類では null）にします。
 - `used_for_training` は、最終モデルの学習に使った行だけが true です。入力に目的変数の列か `train_filters` の列が無いときは null です。
-- 表には `run.json` の `candidate_columns` が含まれていれば足ります。列の順は問わず、余分な列は無視されます。
+- 入力には、候補列（`run.json` の `candidate_columns`）と、`filters` に使う列が要ります。目的変数の列があるときは、`time_column`・`group_column` の列も要ります（学習に使った行の照合のため）。無ければ終了コード 2 で止まります。列の順は問わず、余分な列は無視されます。
 
 ### mloom を使わずに予測する
 
@@ -112,6 +112,7 @@ if passed.any():  # 0 行では predict を呼ばない
     prediction[passed.to_numpy()] = bundle["pipeline"].predict(data.filter(passed))
 ```
 
+- `pipeline` の `predict` に渡す表には、候補列があれば足ります（列の順は問わず、余分な列は無視されます）。`filters` を評価するには、その列も要ります。
 - 例は、比較の演算子（`eq`・`lt` など）の `filters` だけを扱います。ほかの演算子、日時の値（ISO 8601 の文字列を列の型に変換して比べる）、浮動小数の列の NaN（`mloom predict` では欠損として条件を満たさない）は、[docs/spec.md](docs/spec.md) の「行のフィルタ」に合わせて書き足してください。
 - 分類では、`prediction` を `np.full(data.height, None, dtype=object)` で用意します。
 - `model.pkl` は pickle です。pickle は読むときに任意のコードを実行できるため、信頼できないファイルは読まないでください。

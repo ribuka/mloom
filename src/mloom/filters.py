@@ -7,8 +7,9 @@ hold it as it was given and a reader needs neither mloom nor polars.
 """
 
 import json
+import re
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ STRING_OPS = ("str_contains_all", "str_contains_any")
 OPS = (*COMPARISONS, "is_in", "is_between", *NULL_OPS, *STRING_OPS)
 FILE_KEYS = ("filters", "train_filters")
 _CONDITION_KEYS = {"column", "op", "value"}
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_NANOSECONDS = {"ns": 1, "us": 1_000, "ms": 1_000_000}
 _VALUE_FORMS = {
     "scalar": "a number, a string or a boolean",
     "list": "a non-empty list of numbers, strings or booleans",
@@ -258,13 +261,30 @@ def _literal(value: Any, dtype: pl.DataType, where: str) -> pl.Expr:  # noqa: AN
 
 def _datetime_literal(value: str, dtype: pl.Datetime, where: str) -> pl.Expr:
     moment = _parse(datetime.fromisoformat, value, "an ISO 8601 datetime", where)
-    if dtype.time_zone is None:
-        if moment.tzinfo is not None:
-            raise InputError(f"{where}: value {value!r} has a UTC offset, but the column has no time zone")
-        return pl.lit(moment).cast(pl.Datetime(dtype.time_unit))
-    if moment.tzinfo is None:
+    if dtype.time_zone is None and moment.tzinfo is not None:
+        raise InputError(f"{where}: value {value!r} has a UTC offset, but the column has no time zone")
+    if dtype.time_zone is not None and moment.tzinfo is None:
         raise InputError(f"{where}: value {value!r} needs a UTC offset; the column is in {dtype.time_zone}")
-    return pl.lit(moment).dt.convert_time_zone(dtype.time_zone).dt.cast_time_unit(dtype.time_unit)
+    # Count in the unit of the column from the string itself: fromisoformat drops the digits below microseconds.
+    nanoseconds = _epoch_nanoseconds(moment, value)
+    ticks, rest = divmod(nanoseconds or 0, _NANOSECONDS[dtype.time_unit])
+    if nanoseconds is None or rest:
+        raise InputError(f"{where}: value {value!r} is finer than the time unit {dtype.time_unit} of the column")
+    if dtype.time_zone is None:
+        return pl.lit(ticks, dtype=pl.Int64).cast(pl.Datetime(dtype.time_unit))
+    return pl.lit(ticks, dtype=pl.Int64).cast(pl.Datetime(dtype.time_unit, "UTC")).dt.convert_time_zone(dtype.time_zone)
+
+
+def _epoch_nanoseconds(moment: datetime, value: str) -> int | None:
+    # Nanoseconds since 1970-01-01 (UTC for a value with an offset, the wall time otherwise);
+    # None when the value is finer than a nanosecond.
+    since = moment.replace(tzinfo=moment.tzinfo or UTC) - _EPOCH
+    fraction = re.search(r"[.,](\d+)", value)
+    below_microseconds = fraction.group(1)[6:] if fraction else ""
+    if below_microseconds.rstrip("0")[3:]:
+        return None
+    extra = int(below_microseconds[:3].ljust(3, "0"))
+    return ((since.days * 86_400 + since.seconds) * 1_000_000 + since.microseconds) * 1_000 + extra
 
 
 def _parse[T](parse: Callable[[str], T], value: str, form: str, where: str) -> T:
