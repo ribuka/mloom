@@ -33,6 +33,7 @@ mloom は PC に 1 つ clone し、Skill はジャンクションで各エージ
    - Skill は、ジャンクションの実際のパスから `<clone>` を求め、利用側リポジトリの直下で `uv run --project "<clone>" mloom ...` を実行します。
 4. 更新は、clone で `git pull` と `uv sync` を実行するだけです。ジャンクションの先が変わるので、Skill も mloom と同じ版になります。
 5. 利用側リポジトリには mloom を入れません（`uv add mloom` などをしない）。`config/mloom.toml`・`config/unavailable-sensors.json`・データ・出力先は、利用側リポジトリに置きます。
+   - 任意で、列の説明表 `config/columns.csv`（`.tsv`・`.md`・`.txt` でもよい。複数あればすべて読みます）を置けます。書式は自由で、列名・意味・単位・いつ測るかなどを書きます（既存のタグ一覧を貼ってもよい）。Skill が、リークや予測する時点で使えない疑いのある列を提案するときの根拠として読みます。mloom は読みません。Skill はこのファイルを作らず、書き換えません。
 
 ジャンクションを消すときは、`(Get-Item "$HOME\.claude\skills\model-optimization").Delete()` のように、ジャンクションだけを消します（`Remove-Item -Recurse` は先のファイルまで消すことがあります）。
 
