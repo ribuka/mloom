@@ -44,6 +44,16 @@ def test_a_pair_exactly_at_max_correlation_is_not_clustered() -> None:
     assert correlation_clusters(x, r - 1e-9) == [[0, 1]]
 
 
+def test_the_boundary_holds_where_one_minus_rho_rounds() -> None:
+    """|ρ| is compared with ``max_correlation`` itself, even where ``1 - |ρ|`` and ``1 - max_correlation`` round alike."""
+    x = np.column_stack([np.arange(5), [0, 3, 4, 2, 1]])
+    assert abs_spearman(x)[0, 1] == 0.1
+    below = np.nextafter(0.1, 0.0)
+    assert 1.0 - below == 1.0 - 0.1
+    assert correlation_clusters(x, below) == [[0, 1]]
+    assert correlation_clusters(x, 0.1) == [[0], [1]]
+
+
 def test_a_chain_of_correlations_is_not_one_cluster() -> None:
     """With a–b and b–c above the threshold but a–c below it, a and c never share a cluster."""
     rng = np.random.default_rng(2)

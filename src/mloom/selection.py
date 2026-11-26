@@ -12,7 +12,7 @@ import warnings
 from typing import Any
 
 import numpy as np
-from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 from scipy.stats import rankdata
 from sklearn.feature_selection import f_classif, f_regression
@@ -65,8 +65,9 @@ def abs_spearman(x: np.ndarray) -> np.ndarray:
 def correlation_clusters(x: np.ndarray, max_correlation: float) -> list[list[int]]:
     """Cluster the columns whose |Spearman correlation| is above ``max_correlation``.
 
-    Complete linkage on the distance ``1 - |ρ|``: every two columns of a
-    cluster have |ρ| above ``max_correlation`` (``abs_spearman``).
+    Complete linkage on the distance ``1 - |ρ|`` builds the tree; it is cut
+    into the largest subtrees in which every two columns have |ρ| above
+    ``max_correlation`` (``abs_spearman``), compared on |ρ| itself.
 
     Parameters
     ----------
@@ -85,16 +86,34 @@ def correlation_clusters(x: np.ndarray, max_correlation: float) -> list[list[int
     n_columns = x.shape[1]
     if n_columns < 2:  # linkage needs two columns
         return [list(range(n_columns))]
-    distance = 1.0 - abs_spearman(x)
+    rho = abs_spearman(x)
+    distance = 1.0 - rho
     np.fill_diagonal(distance, 0.0)
     tree = linkage(squareform(distance, checks=False), method="complete")
-    # fcluster keeps merges at or below t; the largest float below 1 - max_correlation keeps those below it,
-    # so a pair is merged only when its |ρ| is above max_correlation.
-    labels = fcluster(tree, t=np.nextafter(1.0 - max_correlation, -np.inf), criterion="distance")
-    clusters: dict[int, list[int]] = {}
-    for position, label in enumerate(labels):
-        clusters.setdefault(int(label), []).append(position)
-    return sorted(clusters.values())
+    members, lowest = _subtrees(tree, rho)
+    # 1 - |ρ| can round two |ρ| to one distance, so the cut compares |ρ| with max_correlation instead of
+    # the heights of the tree with 1 - max_correlation.
+    clusters = []
+    nodes = [len(members) - 1]
+    while nodes:
+        node = nodes.pop()
+        if lowest[node] > max_correlation:
+            clusters.append(sorted(members[node]))
+        else:
+            nodes.extend(int(child) for child in tree[node - n_columns, :2])
+    return sorted(clusters)
+
+
+def _subtrees(tree: np.ndarray, rho: np.ndarray) -> tuple[list[list[int]], list[float]]:
+    # The columns under each node of the tree (leaves first, as scipy numbers them), and the lowest |ρ|
+    # of a pair among them (inf for a single column).
+    members: list[list[int]] = [[i] for i in range(rho.shape[0])]
+    lowest = [np.inf] * rho.shape[0]
+    for left, right, *_ in tree:
+        a, b = members[int(left)], members[int(right)]
+        members.append(a + b)
+        lowest.append(min(lowest[int(left)], lowest[int(right)], float(rho[np.ix_(a, b)].min())))
+    return members, lowest
 
 
 def column_scores(task: str, preprocess: Pipeline, x: np.ndarray, y: np.ndarray, x_statistics: np.ndarray) -> np.ndarray:
