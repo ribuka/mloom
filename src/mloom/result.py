@@ -1,4 +1,9 @@
-"""The result of a run and how it is saved (``model.pkl`` and ``run.json``)."""
+"""The result of a run and how it is saved (``model.pkl`` and ``run.json``).
+
+``model.pkl`` holds a dict of plain Python values, numpy arrays and
+scikit-learn parts only, so that it can be read without mloom (see
+"``model.pkl``" in ``docs/spec.md``).
+"""
 
 import json
 import pickle
@@ -8,10 +13,12 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from sklearn.pipeline import Pipeline
 
 from mloom.columns import ColumnPlan
 from mloom.config import Config
+from mloom.row_hash import hash_columns
 from mloom.sensors import UnavailableSensors
 from mloom.settings import Settings
 
@@ -32,12 +39,17 @@ class DataSummary:
         Rows of the input.
     n_columns : int
         Columns of the input.
+    n_rows_filtered_out : int
+        Rows removed by ``filters``.
+    n_rows_train_filtered_out : int
+        Rows removed by ``train_filters``, among those left by ``filters``.
     n_rows_used : int
         Rows used for training.
     n_unlabeled_rows_used : int
         Rows without a target used for the statistics of the features.
     n_rows_without_target : int
-        Rows dropped because the target is missing.
+        Rows whose target is missing (null or NaN), among those left by the
+        filters. They are not trained on; some may join the statistics.
     n_rows_with_infinite : int
         Rows dropped because of +inf or -inf.
     infinite_by_column : dict[str, int]
@@ -47,6 +59,8 @@ class DataSummary:
     path: str | None
     n_rows: int
     n_columns: int
+    n_rows_filtered_out: int
+    n_rows_train_filtered_out: int
     n_rows_used: int
     n_unlabeled_rows_used: int
     n_rows_without_target: int
@@ -85,6 +99,10 @@ class Result:
         Description of the search.
     created_at : str
         ISO 8601 time the run finished.
+    training_hashes : np.ndarray
+        Sorted unique uint64 hashes (``mloom.row_hash``) of the rows the
+        pipeline was fitted on, by the columns of
+        ``mloom.row_hash.hash_columns``.
     """
 
     pipeline: Pipeline
@@ -99,6 +117,7 @@ class Result:
     cv: dict[str, Any]
     hpo: dict[str, Any]
     created_at: str
+    training_hashes: np.ndarray
 
     def to_dict(self) -> dict[str, Any]:
         """Build the content of ``run.json``.
@@ -119,6 +138,8 @@ class Result:
             "metric": config.metric_name,
             "metric_direction": config.metric_spec.direction,
             "seed": config.seed,
+            "filters": [dict(condition) for condition in config.filters],
+            "train_filters": [dict(condition) for condition in config.train_filters],
             "unavailable_sensors": {
                 "path": self.sensors.path,
                 "found": self.sensors.found,
@@ -134,6 +155,29 @@ class Result:
             "best_params": self.best_params,
             "cv_scores": self.cv_scores,
             "versions": _versions(),
+        }
+
+    def model_bundle(self) -> dict[str, Any]:
+        """Build the content of ``model.pkl``.
+
+        Returns
+        -------
+        dict[str, Any]
+            ``pipeline``, ``filters``, ``train_filters`` and ``training_rows``
+            (see "``model.pkl``" in ``docs/spec.md``).
+        """
+        config = self.config
+        return {
+            "pipeline": self.pipeline,
+            "filters": [dict(condition) for condition in config.filters],
+            "train_filters": [dict(condition) for condition in config.train_filters],
+            "training_rows": {
+                "columns": hash_columns(self.columns.candidates, config),
+                "target": config.target,
+                "time_column": config.time_column,
+                "group_column": config.group_column,
+                "hashes": self.training_hashes,
+            },
         }
 
     def save(self, output_dir: str | Path) -> Path:
@@ -153,7 +197,7 @@ class Result:
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / MODEL_FILE).open("wb") as file:
-            pickle.dump(self.pipeline, file)
+            pickle.dump(self.model_bundle(), file)
         run_path = directory / RUN_FILE
         run_path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return run_path

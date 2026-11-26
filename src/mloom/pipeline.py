@@ -1,6 +1,6 @@
 """Building the scikit-learn Pipeline that is tuned, fitted, and pickled.
 
-The steps are: column selection (``ColumnSelector``, only in the saved
+The steps are: column selection (a ``ColumnTransformer``, only in the saved
 pipeline) → preprocessing (imputation, and standardization for some models)
 → feature selection (``SelectKBest``) → the estimator.
 
@@ -8,13 +8,17 @@ The preprocessing uses no target, so it is fitted beforehand on the rows the
 statistics come from (which may include unlabeled rows) and frozen. The
 feature selection and the estimator are fitted with the pipeline, so CV fits
 them on the training folds only.
+
+The saved pipeline holds only parts of scikit-learn (and of the model's
+library), never a class or function of mloom, so that ``model.pkl`` can be
+read without mloom (see "``model.pkl``" in ``docs/spec.md``).
 """
 
 from typing import Any
 
 import numpy as np
 import polars as pl
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
 from sklearn.feature_selection import SelectKBest, f_classif, f_regression
 from sklearn.frozen import FrozenEstimator
 from sklearn.impute import SimpleImputer
@@ -59,67 +63,6 @@ def to_matrix(frame: pl.DataFrame, columns: list[str]) -> np.ndarray:
     return frame.select([as_float(name) for name in columns]).to_numpy().astype(np.float64)
 
 
-class ColumnSelector(TransformerMixin, BaseEstimator):
-    """Select the feature columns of a table by name and return a matrix.
-
-    It lets the saved pipeline take the whole table: columns it does not use
-    are ignored.
-
-    Parameters
-    ----------
-    columns : list[str]
-        Feature columns, in the order the following steps expect.
-    """
-
-    def __init__(self, columns: list[str]) -> None:
-        self.columns = columns
-
-    def fit(self, X: Any, y: Any = None) -> "ColumnSelector":  # noqa: ANN401, ARG002 - scikit-learn signature
-        """Do nothing; the columns are fixed at construction.
-
-        Parameters
-        ----------
-        X : Any
-            Ignored.
-        y : Any
-            Ignored.
-
-        Returns
-        -------
-        ColumnSelector
-            This transformer.
-        """
-        return self
-
-    def transform(self, X: Any) -> np.ndarray:  # noqa: ANN401 - scikit-learn signature
-        """Select the columns.
-
-        Parameters
-        ----------
-        X : Any
-            A polars DataFrame, or a table indexable by a list of column names
-            (such as a pandas DataFrame).
-
-        Returns
-        -------
-        np.ndarray
-            Float matrix of the selected columns.
-        """
-        if isinstance(X, pl.DataFrame):
-            return to_matrix(X, self.columns)
-        return np.asarray(X[self.columns], dtype=np.float64)
-
-    def __sklearn_is_fitted__(self) -> bool:
-        """Report that the transformer is always ready.
-
-        Returns
-        -------
-        bool
-            Always ``True``.
-        """
-        return True
-
-
 def fit_preprocess(config: Config, x: np.ndarray) -> Pipeline:
     """Fit the imputation (and the standardization, for some models).
 
@@ -160,7 +103,9 @@ def build_pipeline(
         the pipeline fits only the feature selection and the model.
     columns : list[str] | None
         Feature columns. When given, the pipeline starts with a
-        ``ColumnSelector`` and takes a table; otherwise it takes a matrix.
+        ``ColumnTransformer`` that selects them by name, and takes a table
+        (polars or pandas) with them in any order; other columns are dropped.
+        Otherwise it takes a matrix.
 
     Returns
     -------
@@ -177,5 +122,21 @@ def build_pipeline(
         ("model", config.model_spec.build(config.task, params, config.seed)),
     ]
     if columns is not None:
-        steps.insert(0, ("columns", ColumnSelector(columns)))
+        steps.insert(0, ("columns", ColumnTransformer([("keep", "passthrough", columns)], remainder="drop")))
     return Pipeline(steps)
+
+
+def candidate_columns(pipeline: Pipeline) -> list[str]:
+    """Tell the columns a saved pipeline selects from its input table.
+
+    Parameters
+    ----------
+    pipeline : Pipeline
+        A pipeline built with ``columns``.
+
+    Returns
+    -------
+    list[str]
+        The feature candidates, in the order of the matrix.
+    """
+    return list(pipeline.named_steps["columns"].transformers[0][2])

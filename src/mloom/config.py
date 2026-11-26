@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mloom.errors import InputError
+from mloom.filters import Condition, check_conditions
 from mloom.metrics import DEFAULT_METRICS, METRICS, Metric
 from mloom.models import MODELS, ModelSpec
 
@@ -37,6 +38,11 @@ class Config:
         Evaluation metric. ``None`` uses the default of the task.
     exclude_columns : tuple[str, ...]
         Columns the user excludes from the features.
+    filters : tuple[dict, ...]
+        Conditions on the rows of training and prediction, combined with AND
+        (see "行のフィルタ" in ``docs/spec.md``).
+    train_filters : tuple[dict, ...]
+        Conditions on the rows of training only, in the same form.
     unavailable_sensors : Path | None
         JSON file of the sensors that must not be used, relative to the
         current directory. ``None`` reads no file.
@@ -60,6 +66,8 @@ class Config:
     group_column: str | None = None
     metric: str | None = None
     exclude_columns: tuple[str, ...] = ()
+    filters: tuple[Condition, ...] = ()
+    train_filters: tuple[Condition, ...] = ()
     unavailable_sensors: Path | None = field(default=DEFAULT_UNAVAILABLE_SENSORS)
     settings: Path | None = field(default=DEFAULT_SETTINGS)
     n_trials: int = 100
@@ -88,6 +96,8 @@ class Config:
             raise InputError(f"n_splits must be 2 or more, got {self.n_splits}")
         if self.n_trials < 1:
             raise InputError(f"n_trials must be 1 or more, got {self.n_trials}")
+        check_conditions(self.filters, "filters")
+        check_conditions(self.train_filters, "train_filters")
 
     @property
     def metric_name(self) -> str:

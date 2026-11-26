@@ -1,9 +1,10 @@
-"""The command line: turns arguments into a ``Config``, runs it, and saves the result.
+"""The command line: turns arguments into calls of the API, and saves the results.
 
 It holds no processing of its own (see "CLI" in ``docs/spec.md``). Exit
 codes: 0 on success, 2 for invalid input (including invalid arguments), 1
-for any other error. The last line of stdout is the path of ``run.json``;
-progress and errors go to stderr.
+for any other error. The last line of stdout is the path of the saved file
+(``run.json`` of ``optimize``, the predictions of ``predict``); progress and
+errors go to stderr.
 """
 
 import argparse
@@ -20,9 +21,11 @@ from mloom.config import (
     Config,
 )
 from mloom.errors import InputError
+from mloom.filters import load_filters
 from mloom.metrics import METRICS
 from mloom.models import MODELS
 from mloom.optimize import optimize_model
+from mloom.prediction import PASSED_FILTER, predict
 from mloom.result import Result
 
 EXIT_OK = 0
@@ -69,9 +72,19 @@ def build_parser() -> argparse.ArgumentParser:
             "keys it does not set come from the defaults of mloom"
         ),
     )
+    optimize.add_argument(
+        "--filters",
+        type=Path,
+        help='JSON {"filters": [...], "train_filters": [...]} of the conditions on the rows',
+    )
     optimize.add_argument("--n-trials", type=int, default=100)
     optimize.add_argument("--timeout", type=float, help="seconds")
     optimize.add_argument("--seed", type=int, default=0)
+    predict_parser = commands.add_parser("predict", help="predict every row of a Parquet file with a model.pkl")
+    predict_parser.add_argument("model", type=Path, help="model.pkl saved by optimize")
+    predict_parser.add_argument("data", type=Path, help="Parquet file")
+    predict_parser.add_argument("--output", required=True, type=Path, help="Parquet file of the predictions")
+    predict_parser.add_argument("--keep-columns", nargs="*", default=[], metavar="COL", help="input columns to copy")
     return parser
 
 
@@ -91,8 +104,10 @@ def to_config(args: argparse.Namespace) -> Config:
     Raises
     ------
     InputError
-        When the arguments do not make a valid config.
+        When the arguments do not make a valid config, or the filters file
+        is invalid.
     """
+    filters, train_filters = load_filters(args.filters) if args.filters is not None else ((), ())
     return Config(
         target=args.target,
         task=args.task,
@@ -103,6 +118,8 @@ def to_config(args: argparse.Namespace) -> Config:
         group_column=args.group_column,
         metric=args.metric,
         exclude_columns=tuple(args.exclude_columns),
+        filters=filters,
+        train_filters=train_filters,
         unavailable_sensors=args.unavailable_sensors,
         settings=args.settings,
         n_trials=args.n_trials,
@@ -125,18 +142,32 @@ def main(argv: list[str] | None = None) -> int:
         Exit code.
     """
     args = build_parser().parse_args(argv)
+    run = _optimize if args.command == "optimize" else _predict
     try:
-        result = optimize_model(args.data, to_config(args))
-        run_path = result.save(args.output)
+        saved = run(args)
     except InputError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INPUT
     except Exception:  # noqa: BLE001 - any other failure is reported as exit code 1
         traceback.print_exc()
         return EXIT_ERROR
-    _print_summary(result)
-    print(run_path)
+    print(saved)
     return EXIT_OK
+
+
+def _optimize(args: argparse.Namespace) -> Path:
+    result = optimize_model(args.data, to_config(args))
+    run_path = result.save(args.output)
+    _print_summary(result)
+    return run_path
+
+
+def _predict(args: argparse.Namespace) -> Path:
+    predictions = predict(args.model, args.data, keep_columns=tuple(args.keep_columns))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    predictions.write_parquet(args.output)
+    print(f"{predictions.height} rows predicted; {predictions[PASSED_FILTER].sum()} passed the filters", file=sys.stderr)
+    return args.output
 
 
 def _print_summary(result: Result) -> None:

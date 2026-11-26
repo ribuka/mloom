@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 
 from mloom.cli import EXIT_INPUT, EXIT_OK, main
+from mloom.prediction import predict
 
 
 @pytest.fixture
@@ -67,3 +68,74 @@ def test_invalid_arguments_exit_with_2(data_path: Path, tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as raised:
         main(_args(data_path, tmp_path / "out", "--model", "svm"))
     assert raised.value.code == EXIT_INPUT
+
+
+@pytest.fixture
+def filters_path(tmp_path: Path) -> Path:
+    """Write a filters file with both lists and return its path."""
+    path = tmp_path / "filters.json"
+    path.write_text(
+        json.dumps(
+            {
+                "filters": [{"column": "s0", "op": "gt", "value": -1}],
+                "train_filters": [{"column": "lot", "op": "str_contains_any", "value": ["L1", "L2"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_predict_saves_what_the_api_returns(
+    data_path: Path, filters_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``optimize --filters`` then ``predict`` save the result of ``mloom.predict``; stdout ends with its path."""
+    model_dir = tmp_path / "model"
+    assert main(_args(data_path, model_dir, "--filters", str(filters_path))) == EXIT_OK
+    run = json.loads((model_dir / "run.json").read_text(encoding="utf-8"))
+    assert run["filters"] == json.loads(filters_path.read_text(encoding="utf-8"))["filters"]
+    assert run["data"]["n_rows_train_filtered_out"] > 0
+    capsys.readouterr()
+
+    output = tmp_path / "out" / "predictions.parquet"
+    command = ["predict", str(model_dir / "model.pkl"), str(data_path), "--output", str(output)]
+    assert main([*command, "--keep-columns", "t", "lot"]) == EXIT_OK
+
+    assert Path(capsys.readouterr().out.strip().splitlines()[-1]) == output
+    expected = predict(model_dir / "model.pkl", data_path, keep_columns=("t", "lot"))
+    assert pl.read_parquet(output).equals(expected)
+    assert expected["used_for_training"].sum() == run["data"]["n_rows_used"]
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("{", "is not valid JSON"),
+        ('{"filters": [{"column": "s0", "op": "above", "value": 0}]}', "unknown op"),
+        ('{"filters": [{"column": "nope", "op": "is_null"}]}', "column 'nope' is not in the data"),
+        ('{"train_filters": [{"column": "s0", "op": "lt", "value": "0"}]}', "does not fit the column"),
+    ],
+)
+def test_invalid_filters_exit_with_2(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], content: str, message: str
+) -> None:
+    """An invalid filters file stops before training with exit code 2."""
+    path = tmp_path / "filters.json"
+    path.write_text(content, encoding="utf-8")
+    assert main(_args(data_path, tmp_path / "out", "--filters", str(path))) == EXIT_INPUT
+    assert message in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_invalid_predict_input_exits_with_2(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A missing model or a column of ``--keep-columns`` not in the data exits with code 2."""
+    output = tmp_path / "predictions.parquet"
+    assert main(["predict", str(tmp_path / "none.pkl"), str(data_path), "--output", str(output)]) == EXIT_INPUT
+    assert "model file not found" in capsys.readouterr().err
+    assert main(_args(data_path, tmp_path / "model")) == EXIT_OK
+    command = ["predict", str(tmp_path / "model" / "model.pkl"), str(data_path), "--output", str(output)]
+    assert main([*command, "--keep-columns", "nope"]) == EXIT_INPUT
+    assert "['nope'] not in the data" in capsys.readouterr().err
+    assert not output.exists()

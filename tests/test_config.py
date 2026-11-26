@@ -20,6 +20,8 @@ from mloom.errors import InputError
         ({"cv": "group"}, "needs group_column"),
         ({"n_splits": 1}, "n_splits must be 2 or more"),
         ({"n_trials": 0}, "n_trials must be 1 or more"),
+        ({"filters": ({"column": "x", "op": "like", "value": 1},)}, r"filters\[0\] has an unknown op"),
+        ({"train_filters": ({"column": "x", "op": "is_in", "value": 1},)}, r"train_filters\[0\]: op 'is_in' needs"),
     ],
 )
 def test_invalid_config_raises(make_config: Callable[..., Config], overrides: dict, message: str) -> None:
