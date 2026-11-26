@@ -94,7 +94,7 @@ def optimize_model(data: Data, config: Config) -> Result:
     clusters = correlation_clusters(x_statistics, settings.selection.max_correlation)
     cv_plan = plan_cv(rows, y, training.unlabeled, config)
 
-    study = _search(config, preprocessing, (x, y, x_unlabeled), clusters, cv_plan)
+    study, _ = _search(config, preprocessing, (x, y, x_unlabeled), clusters, cv_plan)
     best = study.best_trial
     params = {name: value for name, value in best.params.items() if name != K_PARAM}
     preprocess = fit_preprocess(preprocessing, x_statistics)
@@ -157,7 +157,8 @@ def _search(
     data: tuple[np.ndarray, np.ndarray, np.ndarray],
     clusters: list[list[int]],
     cv_plan: CVPlan,
-) -> optuna.Study:
+) -> tuple[optuna.Study, list[tuple[Pipeline, np.ndarray]]]:
+    # Also returns the fitted preprocessing and the ranking of each fold (``_prepare_fold``).
     x, y, x_unlabeled = data
     # Only one representative of each cluster can be selected.
     n_clusters = len(clusters)
@@ -185,7 +186,7 @@ def _search(
     study.optimize(objective, n_trials=config.n_trials, timeout=config.timeout)
     if not _completed(study):
         raise OptimizationError("no trial finished with a score; see the warnings of the failed trials")
-    return study
+    return study, prepared
 
 
 def _prepare_fold(
