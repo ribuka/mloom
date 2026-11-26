@@ -22,7 +22,14 @@ mloom は PC に 1 つ clone し、Skill はジャンクションで各エージ
    New-Item -ItemType Junction -Path "$HOME\.agents\skills\model-optimization" -Target "<clone>\skills\model-optimization"
    ```
 
-   - 置き場所は、[Claude Code のドキュメント](https://code.claude.com/docs/en/skills)と [Codex のドキュメント](https://developers.openai.com/codex/skills)（2026-11-26 時点で https://learn.chatgpt.com/docs/build-skills に転送）、それにこの手順で作ったジャンクションが読まれることで確かめました（[docs/spec.md](docs/spec.md) の「配布と実行」）。
+   - 置き場所と深さ（2026-11-26 に確かめた結果。詳細は [docs/spec.md](docs/spec.md) の「配布と実行」）:
+
+     | エージェント | 置き場所 | 深さ | 確かめた方法 |
+     | --- | --- | --- | --- |
+     | Claude Code | `~/.claude/skills` | 1 段（`<置き場所>/<名前>/SKILL.md`） | [ドキュメント](https://code.claude.com/docs/en/skills)（`<名前>` はシンボリックリンクでもよい）と、この PC の `~/.claude/skills/<名前>` のジャンクションの Skill がセッションに読まれること |
+     | Codex | `~/.agents/skills` | 置き場所の下を再帰的に探す（2 段下の `SKILL.md` も見つかる）。ジャンクションもたどる | [ドキュメント](https://developers.openai.com/codex/skills)（2026-11-26 時点で https://learn.chatgpt.com/docs/build-skills に転送）と、codex-cli 0.172.0 の `codex debug prompt-input`（モデルに渡す Skill の一覧を出す）で、2 段下の `SKILL.md` とジャンクションの先の `SKILL.md` が一覧に出たこと |
+
+   - どちらも、Skill のディレクトリ（`model-optimization`）のジャンクションを置き場所の直下に置けば見つかります。
    - Skill は、ジャンクションの実際のパスから `<clone>` を求め、利用側リポジトリの直下で `uv run --project "<clone>" mloom ...` を実行します。
 4. 更新は、clone で `git pull` と `uv sync` を実行するだけです。ジャンクションの先が変わるので、Skill も mloom と同じ版になります。
 5. 利用側リポジトリには mloom を入れません（`uv add mloom` などをしない）。`config/mloom.toml`・`config/unavailable-sensors.json`・データ・出力先は、利用側リポジトリに置きます。
