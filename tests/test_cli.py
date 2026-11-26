@@ -176,8 +176,9 @@ def test_invalid_predict_input_exits_with_2(
         (None, "model file not found"),
         ([dict.fromkeys(("pipeline", "filters", "train_filters", "training_rows", "shap_background"))], "make it again"),
         ([[1]], "does not start with the record of the run"),
+        ([bytes([128, 255, 46])], "is not a model.pkl of mloom"),
     ],
-    ids=["missing", "without a record", "not a dict"],
+    ids=["missing", "without a record", "not a dict", "broken"],
 )
 def test_show_and_predict_of_an_invalid_model_exit_with_2(
     data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], pickles: list | None, message: str
@@ -185,7 +186,7 @@ def test_show_and_predict_of_an_invalid_model_exit_with_2(
     """``show`` and ``predict`` of a file without the record of the run exit with code 2 and save nothing."""
     path = tmp_path / "model.pkl"
     if pickles is not None:
-        path.write_bytes(b"".join(pickle.dumps(content) for content in pickles))
+        path.write_bytes(b"".join(c if isinstance(c, bytes) else pickle.dumps(c) for c in pickles))
     output = tmp_path / "predictions.parquet"
     assert main(["show", str(path)]) == EXIT_INPUT
     assert message in capsys.readouterr().err

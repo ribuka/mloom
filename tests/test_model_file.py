@@ -16,6 +16,7 @@ from mloom import Config, InputError, Result, optimize_model, read_run
 from mloom.prediction import load_model
 
 BUNDLE_KEYS = {"pipeline", "filters", "train_filters", "training_rows", "shap_background"}
+BROKEN_PICKLE = bytes([128, 255, 46])  # protocol 255: pickle.load raises ValueError
 
 
 @pytest.fixture
@@ -25,7 +26,8 @@ def result(frame: pl.DataFrame, make_config: Callable[..., Config]) -> Result:
 
 
 def _write(path: Path, *pickles: object) -> Path:
-    path.write_bytes(b"".join(pickle.dumps(content) for content in pickles))
+    """Write each object as a pickle, and bytes as they are."""
+    path.write_bytes(b"".join(content if isinstance(content, bytes) else pickle.dumps(content) for content in pickles))
     return path
 
 
@@ -75,16 +77,25 @@ def test_read_run_does_not_read_the_model(tmp_path: Path) -> None:
         load_model(path)
 
 
+def test_broken_model_after_the_record_raises(tmp_path: Path) -> None:
+    """``load_model`` raises ``InputError`` when the second pickle is broken; ``read_run`` still reads the record."""
+    path = _write(tmp_path / "model.pkl", {"mloom_version": "0.0.0"}, BROKEN_PICKLE)
+    assert read_run(path) == {"mloom_version": "0.0.0"}
+    with pytest.raises(InputError, match="has no model after the record of the run"):
+        load_model(path)
+
+
 @pytest.mark.parametrize(
     ("pickles", "message"),
     [
         (None, "model file not found"),
         ((), "is not a model.pkl of mloom"),
+        ((BROKEN_PICKLE,), "is not a model.pkl of mloom"),
         ((dict.fromkeys(BUNDLE_KEYS),), "make it again with mloom optimize"),
         (([1],), "does not start with the record of the run"),
         (({"created_at": "2026-11-26"},), "does not start with the record of the run"),
     ],
-    ids=["missing", "empty", "without a record", "not a dict", "no mloom_version"],
+    ids=["missing", "empty", "broken", "without a record", "not a dict", "no mloom_version"],
 )
 def test_file_without_a_record_raises(tmp_path: Path, pickles: tuple | None, message: str) -> None:
     """``read_run`` and ``load_model`` raise ``InputError`` for a file that does not start with a record."""

@@ -468,8 +468,8 @@ n_neighbors = 5
 - `mloom.read_run(path)` は 1 段目だけを読む（2 段目が無くても読める）。`mloom.prediction.load_model` は 1 段目を読み飛ばし、2 段目を返す。どちらも `mloom.model_file` が読み、このモジュールは scikit-learn と numpy を import しない（2026-11-26 実装で決定。`mloom` のパッケージの import では読み込まれる）。
 - 次のときは `InputError`（終了コード 2）で止める（2026-11-26、Issue #18）:
   - ファイルが無い。
-  - 1 段目が pickle として読めない、`dict` でない、または `mloom_version` のキーが無い。記録の入っていない以前の（1 段だけの）`model.pkl` もここに当たり、メッセージで `mloom optimize` で作り直すよう案内する。古い形を読み替える処理は作らない（`AGENTS.md`）。
-  - 2 段目が無い、または下の 5 つのキーを持つ辞書でない（`load_model` と `mloom predict` のとき）。
+  - 1 段目が pickle として読めない（途中で切れている、知らないプロトコルなど。`pickle.load` の `EOFError`・`UnpicklingError`・`ValueError`）、`dict` でない、または `mloom_version` のキーが無い。記録の入っていない以前の（1 段だけの）`model.pkl` もここに当たり、メッセージで `mloom optimize` で作り直すよう案内する。古い形を読み替える処理は作らない（`AGENTS.md`）。
+  - 2 段目が無いか読めない、または下の 5 つのキーを持つ辞書でない（`load_model` と `mloom predict` のとき）。
 - mloom を使わずに読むとき（README に書いた）:
 
   ```python

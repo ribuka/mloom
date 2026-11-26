@@ -17,6 +17,8 @@ from mloom.errors import InputError
 MODEL_FILE = "model.pkl"
 _RECORD_KEY = "mloom_version"
 _TEMP_SUFFIX = ".tmp"
+# What pickle.load raises for a truncated or broken file (ValueError: an unknown protocol, for example).
+_BROKEN = (EOFError, pickle.UnpicklingError, ValueError)
 
 
 def write_model_file(directory: Path, record: dict[str, Any], model: dict[str, Any]) -> Path:
@@ -96,8 +98,8 @@ def read_model(path: str | Path) -> Any:  # noqa: ANN401 - checked by mloom.pred
         _read_record(file)
         try:
             return pickle.load(file)
-        except (EOFError, pickle.UnpicklingError) as error:
-            raise InputError(f"{file.name} has no model after the record of the run") from error
+        except _BROKEN as error:
+            raise InputError(f"{file.name} has no model after the record of the run, or it is broken") from error
 
 
 def _open(path: str | Path) -> BinaryIO:
@@ -110,7 +112,7 @@ def _open(path: str | Path) -> BinaryIO:
 def _read_record(file: BinaryIO) -> dict[str, Any]:
     try:
         record = pickle.load(file)
-    except (EOFError, pickle.UnpicklingError) as error:
+    except _BROKEN as error:
         raise InputError(f"{file.name} is not a model.pkl of mloom") from error
     if not isinstance(record, dict) or _RECORD_KEY not in record:
         raise InputError(
