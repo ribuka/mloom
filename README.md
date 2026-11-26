@@ -100,11 +100,48 @@ predictions = mloom.predict("outputs/quality-ridge/model.pkl", "data/new.parquet
 - 入力と同じ行数・同じ順で、`--keep-columns` の列、`prediction`、`passed_filter`、`used_for_training`、分類では `proba_<クラス>` を返します。
 - `filters` の条件を満たさない行は予測せず、`prediction` を NaN（分類では null）にします。
 - `used_for_training` は、最終モデルの学習に使った行だけが true です。入力に目的変数の列か `train_filters` の列が無いときは null です。
-- 入力には、候補列（`run.json` の `candidate_columns`）と、`filters` に使う列が要ります。目的変数の列があるときは、`time_column`・`group_column` の列も要ります（学習に使った行の照合のため）。無ければ終了コード 2 で止まります。列の順は問わず、余分な列は無視されます。
+- 入力には、候補列（`run.json` の `candidate_columns`）と、`filters` に使う列が要ります。目的変数の列があるときは、`time_column`・`group_column` の列も要ります（学習に使った行の照合と、スコアのため）。無ければ終了コード 2 で止まります。列の順は問わず、余分な列は無視されます。
+
+### スコア・混同行列・SHAP の寄与
+
+```powershell
+# 回帰: 実測が 0 より大きい、予測が 1 より大きいを陽性とする混同行列と、SHAP の寄与
+uv run mloom predict outputs/quality-ridge/model.pkl data/new.parquet --output outputs/quality-ridge/predictions.parquet --cm-actual-threshold 0 --cm-predicted-threshold 1 --cm-positive above --shap
+# 分類: クラス bad の確率が 0.3 より大きいを陽性とする混同行列
+uv run mloom predict outputs/defect-rf/model.pkl data/new.parquet --output outputs/defect-rf/predictions.parquet --positive-class bad --cm-predicted-threshold 0.3
+```
+
+```python
+predictions = mloom.predict(
+    "outputs/quality-ridge/model.pkl",
+    "data/new.parquet",
+    shap=True,
+    cm_actual_threshold=0,
+    cm_predicted_threshold=1,
+    cm_positive="above",
+)
+```
+
+上の列の後ろに、次の順で列が続きます。
+
+| 列 | 内容 | 出す条件 |
+| --- | --- | --- |
+| `error` | 予測 − 実測。スコアの対象の行だけ。ほかの行は null | 回帰のとき |
+| `rmse`、`r2` | スコアの対象の行全体での RMSE と R²。全行に同じ値。対象が 0 行なら null（`r2` は 2 行未満で null） | 回帰のとき |
+| `cm` | スコアの対象の行が、混同行列の `tp`・`fp`・`fn`・`tn` のどれか。ほかの行は null | 閾値（分類では `--positive-class`）を与えたとき |
+| `accuracy`、`precision`、`recall` | スコアの対象の行の `cm` の数から計算した値。全行に同じ値。分母が 0 なら null | 同上 |
+| `shap_base`、`shap_<列名>` | 基準値と、採用した列（`run.json` の `selected_columns`）ごとの SHAP の寄与。多値分類では、クラスごとに `shap_base_<クラス>`、`shap_<クラス>_<列名>`。フィルタの条件を満たさない行は NaN | `--shap` を付けたとき |
+
+- スコアの対象の行は、時刻（`time_column`）が、最終モデルの学習に使った行の最も新しい時刻より後で、目的変数が欠損でも無限大でもなく、予測した（`passed_filter` が true の）行です。学習期間の中の行で測ると、成績が良く見えすぎるためです。
+- `time_column` を指定せずに学習したモデル（`kfold`・`group` の CV）と、入力に目的変数の列が無いときは、スコアと混同行列の列はすべて null です。
+- 回帰の混同行列は、`--cm-actual-threshold`・`--cm-predicted-threshold`・`--cm-positive`（`above` か `below`）を 3 つそろえて与えます。`above` は閾値より大きい値、`below` は閾値より小さい値を陽性とし、閾値ちょうどの値は陰性です。実測は実測の閾値で、予測は予測の閾値で判定します。
+- 分類の混同行列は、`--positive-class` で陽性のクラスを与えます。予測は、そのクラスの確率が `--cm-predicted-threshold`（既定 0.5）より大きいときに陽性です。多値分類では「そのクラスか、それ以外か」で判定します。
+- 引数がモデルに合わないとき（回帰で閾値を一部だけ与えた、回帰で `--positive-class` を与えた、学習時に無いクラスを与えた、など）は、終了コード 2 で止まります。
+- SHAP の寄与は、推定器への入力（前処理と、採用した列の選択の後の値）に対する値です。基準値と寄与の合計は、回帰では予測値、分類では `hist_gradient_boosting` と `ridge`（ロジスティック回帰）は対数オッズ、`random_forest` は確率です。2 値分類は `classes_[1]` に対する値です。`random_forest` の寄与の計算は遅いことがあります（1000 行で約 1 分）。
 
 ### mloom を使わずに予測する
 
-`model.pkl` は、mloom が無い環境でも読めます（学習時と同じ版の scikit-learn・numpy・scipy は要ります。版は `run.json` の `versions` にあります）。中身は `pipeline`、`filters`、`train_filters`、`training_rows` の辞書です。
+`model.pkl` は、mloom が無い環境でも読めます（学習時と同じ版の scikit-learn・numpy・scipy は要ります。版は `run.json` の `versions` にあります）。中身は `pipeline`、`filters`、`train_filters`、`training_rows`、`shap_background` の辞書です。
 
 ```python
 import pickle

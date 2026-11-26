@@ -159,3 +159,57 @@ def test_invalid_predict_input_exits_with_2(
     assert main([*command, "--keep-columns", "nope"]) == EXIT_INPUT
     assert "['nope'] not in the data" in capsys.readouterr().err
     assert not output.exists()
+
+
+@pytest.fixture
+def first_half_model(data_path: Path, tmp_path: Path) -> Path:
+    """Fit a time series model on the first half of the time (``train_filters``) and return its model.pkl."""
+    filters = tmp_path / "first-half.json"
+    filters.write_text(json.dumps({"train_filters": [{"column": "t", "op": "lt", "value": 60}]}), encoding="utf-8")
+    model_dir = tmp_path / "model"
+    extra = ("--cv", "timeseries", "--time-column", "t", "--filters", str(filters))
+    assert main(_args(data_path, model_dir, *extra)) == EXIT_OK
+    return model_dir / "model.pkl"
+
+
+def test_predict_with_scores_and_shap_saves_what_the_api_returns(
+    data_path: Path, first_half_model: Path, tmp_path: Path
+) -> None:
+    """``predict`` with the thresholds and ``--shap`` saves the columns and values of ``mloom.predict``."""
+    output = tmp_path / "predictions.parquet"
+    command = ["predict", str(first_half_model), str(data_path), "--output", str(output), "--shap"]
+    thresholds = ["--cm-actual-threshold", "0", "--cm-predicted-threshold", "0.5", "--cm-positive", "below"]
+    assert main([*command, *thresholds]) == EXIT_OK
+
+    expected = predict(
+        first_half_model, data_path, shap=True, cm_actual_threshold=0.0, cm_predicted_threshold=0.5, cm_positive="below"
+    )
+    saved = pl.read_parquet(output)
+    assert saved.equals(expected)
+    assert saved["rmse"].is_not_null().all()
+    assert saved["cm"].is_not_null().any()
+    assert "shap_base" in saved.columns
+
+
+@pytest.mark.parametrize(
+    ("task", "extra", "message"),
+    [
+        ("regression", ["--cm-actual-threshold", "0", "--cm-positive", "above"], "cm_predicted_threshold"),
+        ("classification", ["--positive-class", "bad"], "'bad' is not a class of the model"),
+        ("regression", ["--positive-class", "pos"], "positive_class is for classification"),
+    ],
+    ids=["some thresholds", "unknown class", "class for regression"],
+)
+def test_invalid_confusion_arguments_exit_with_2(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], task: str, extra: list[str], message: str
+) -> None:
+    """Arguments of the confusion matrix that do not fit the model exit with code 2 and save nothing."""
+    model_dir = tmp_path / "model"
+    target = ["--task", task, "--target", "y" if task == "regression" else "c", "--exclude-columns", "y", "c"]
+    assert main([*_args(data_path, model_dir), *target]) == EXIT_OK
+    capsys.readouterr()
+    output = tmp_path / "predictions.parquet"
+    command = ["predict", str(model_dir / "model.pkl"), str(data_path), "--output", str(output)]
+    assert main([*command, *extra]) == EXIT_INPUT
+    assert message in capsys.readouterr().err
+    assert not output.exists()

@@ -21,6 +21,7 @@ from mloom.config import Config
 from mloom.row_hash import hash_columns
 from mloom.sensors import UnavailableSensors
 from mloom.settings import Settings
+from mloom.training_period import TimeValue
 
 MODEL_FILE = "model.pkl"
 RUN_FILE = "run.json"
@@ -105,6 +106,13 @@ class Result:
         Sorted unique uint64 hashes (``mloom.row_hash``) of the rows the
         pipeline was fitted on, by the columns of
         ``mloom.row_hash.hash_columns``.
+    last_time : TimeValue | None
+        The latest ``time_column`` of the rows the pipeline was fitted on
+        (``mloom.training_period.last_time``); ``None`` without
+        ``time_column``.
+    shap_background : np.ndarray
+        Mean of the input of the estimator on the rows the pipeline was
+        fitted on (``mloom.explain.shap_background``).
     """
 
     pipeline: Pipeline
@@ -121,6 +129,8 @@ class Result:
     hpo: dict[str, Any]
     created_at: str
     training_hashes: np.ndarray
+    last_time: TimeValue | None
+    shap_background: np.ndarray
 
     def to_dict(self) -> dict[str, Any]:
         """Build the content of ``run.json``.
@@ -167,8 +177,8 @@ class Result:
         Returns
         -------
         dict[str, Any]
-            ``pipeline``, ``filters``, ``train_filters`` and ``training_rows``
-            (see "``model.pkl``" in ``docs/spec.md``).
+            ``pipeline``, ``filters``, ``train_filters``, ``training_rows`` and
+            ``shap_background`` (see "``model.pkl``" in ``docs/spec.md``).
         """
         config = self.config
         return {
@@ -181,7 +191,9 @@ class Result:
                 "time_column": config.time_column,
                 "group_column": config.group_column,
                 "hashes": self.training_hashes,
+                "last_time": self.last_time,
             },
+            "shap_background": self.shap_background,
         }
 
     def save(self, output_dir: str | Path) -> Path:

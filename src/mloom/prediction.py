@@ -1,7 +1,9 @@
 """``predict``: predicting with a ``model.pkl``, row by row in the order of the input.
 
 See "予測" in ``docs/spec.md``. The module is not named ``mloom.predict``, so
-that the function ``mloom.predict`` does not hide it.
+that the function ``mloom.predict`` does not hide it. The scores and the
+confusion matrix come from ``mloom.evaluation``, the SHAP contributions from
+``mloom.explain``.
 """
 
 import pickle
@@ -16,6 +18,17 @@ from sklearn.pipeline import Pipeline
 
 from mloom.data import Data, load_data
 from mloom.errors import InputError
+from mloom.evaluation import (
+    CONFUSION_NAMES,
+    SCORE_NAMES,
+    Confusion,
+    classification_confusion,
+    confusion_columns,
+    regression_confusion,
+    regression_scores,
+    scored_rows,
+)
+from mloom.explain import shap_columns, shap_names
 from mloom.filters import filter_mask
 from mloom.pipeline import candidate_columns
 from mloom.row_hash import hash_rows
@@ -25,10 +38,20 @@ PREDICTION = "prediction"
 PASSED_FILTER = "passed_filter"
 USED_FOR_TRAINING = "used_for_training"
 PROBA_PREFIX = "proba_"
-_BUNDLE_KEYS = ("pipeline", "filters", "train_filters", "training_rows")
+_BUNDLE_KEYS = ("pipeline", "filters", "train_filters", "training_rows", "shap_background")
 
 
-def predict(model: Model, data: Data, *, keep_columns: Sequence[str] = ()) -> pl.DataFrame:
+def predict(
+    model: Model,
+    data: Data,
+    *,
+    keep_columns: Sequence[str] = (),
+    shap: bool = False,
+    cm_actual_threshold: float | None = None,
+    cm_predicted_threshold: float | None = None,
+    cm_positive: str | None = None,
+    positive_class: Any = None,  # noqa: ANN401 - any class, matched by str()
+) -> pl.DataFrame:
     """Predict every row of the data, applying the row filters of the model.
 
     Parameters
@@ -39,6 +62,19 @@ def predict(model: Model, data: Data, *, keep_columns: Sequence[str] = ()) -> pl
         Path of a Parquet file, or a polars DataFrame.
     keep_columns : Sequence[str]
         Columns of the input to copy into the output, first.
+    shap : bool
+        Whether to add the SHAP contributions of the selected columns.
+    cm_actual_threshold : float | None
+        Threshold of the target for the confusion matrix (regression).
+    cm_predicted_threshold : float | None
+        Threshold of the prediction (regression), or of the probability of
+        ``positive_class`` (classification; ``None`` for 0.5).
+    cm_positive : str | None
+        ``"above"`` or ``"below"``: which side of the thresholds is positive
+        (regression).
+    positive_class : Any
+        The positive class of the confusion matrix (classification), matched
+        to the classes of the model by ``str()``.
 
     Returns
     -------
@@ -47,32 +83,45 @@ def predict(model: Model, data: Data, *, keep_columns: Sequence[str] = ()) -> pl
         ``prediction``, ``passed_filter``, ``used_for_training``, and for
         classification ``proba_<class>`` in the order of ``classes_``. A row
         that does not pass ``filters`` is not predicted: its ``prediction``
-        is NaN (null for classification) and its probabilities NaN.
+        is NaN (null for classification) and its probabilities NaN. Then,
+        for regression, ``error``, ``rmse`` and ``r2``; with the thresholds
+        (``positive_class`` for classification), ``cm``, ``accuracy``,
+        ``precision`` and ``recall``; with ``shap``, the SHAP columns
+        (``mloom.explain.shap_names``). See "予測" in ``docs/spec.md``.
 
     Raises
     ------
     InputError
         When the model or the data cannot be read, a column the model needs
         or a column of ``keep_columns`` is not in the data, a value of
-        ``filters`` does not fit its column, or a column of ``keep_columns``
-        has the name of an output column.
+        ``filters`` does not fit its column, a column of ``keep_columns``
+        has the name of an output column, two output columns would have
+        the same name (a selected column ``base`` with ``shap``, for
+        example), the arguments of the confusion
+        matrix do not fit the model, or the data has the target but its
+        ``time_column`` cannot be compared with the end of the training
+        period.
     """
     bundle = load_model(model)
     pipeline: Pipeline = bundle["pipeline"]
     frame, _ = load_data(data)
-    _check_keep_columns(frame, keep_columns, _output_names(pipeline))
+    thresholds = (cm_actual_threshold, cm_predicted_threshold, cm_positive, positive_class)
+    if is_classifier(pipeline):
+        confusion = classification_confusion(pipeline.classes_, *thresholds)
+    else:
+        confusion = regression_confusion(*thresholds)
+    outputs = _output_names(pipeline, confusion, shap=shap)
+    _check_unique(outputs)
+    _check_keep_columns(frame, keep_columns, outputs)
     _require_columns(frame, candidate_columns(pipeline), "candidate column")
     passed = filter_mask(frame, bundle["filters"], "filters").to_numpy()
     predicted = _predictions(pipeline, frame, passed)
-    return pl.DataFrame(
-        [
-            *(frame[name] for name in keep_columns),
-            predicted[0],
-            pl.Series(PASSED_FILTER, passed),
-            _used_for_training(frame, bundle, passed),
-            *predicted[1:],
-        ]
-    )
+    used = _used_for_training(frame, bundle, passed)
+    columns = [*(frame[name] for name in keep_columns), predicted[0], pl.Series(PASSED_FILTER, passed), used]
+    columns += [*predicted[1:], *_evaluation(frame, bundle, (passed, predicted), confusion)]
+    if shap:
+        columns += shap_columns(pipeline, frame, passed, bundle["shap_background"])
+    return pl.DataFrame(columns)
 
 
 def load_model(model: Model) -> dict[str, Any]:
@@ -86,7 +135,8 @@ def load_model(model: Model) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        ``pipeline``, ``filters``, ``train_filters`` and ``training_rows``.
+        ``pipeline``, ``filters``, ``train_filters``, ``training_rows`` and
+        ``shap_background``.
 
     Raises
     ------
@@ -106,14 +156,31 @@ def load_model(model: Model) -> dict[str, Any]:
     return bundle
 
 
-def _output_names(pipeline: Pipeline) -> list[str]:
-    return [PREDICTION, PASSED_FILTER, USED_FOR_TRAINING, *_proba_names(pipeline)]
+def _output_names(pipeline: Pipeline, confusion: Confusion | None, *, shap: bool) -> list[str]:
+    names = [PREDICTION, PASSED_FILTER, USED_FOR_TRAINING, *_proba_names(pipeline)]
+    if not is_classifier(pipeline):
+        names += SCORE_NAMES
+    if confusion is not None:
+        names += CONFUSION_NAMES
+    if shap:
+        names += shap_names(pipeline)
+    return names
 
 
 def _proba_names(pipeline: Pipeline) -> list[str]:
     if not is_classifier(pipeline):
         return []
     return [f"{PROBA_PREFIX}{label}" for label in pipeline.classes_]
+
+
+def _check_unique(outputs: list[str]) -> None:
+    # A selected column named "base" gives a second shap_base, and some names of classes and columns clash.
+    clashes = sorted({name for name in outputs if outputs.count(name) > 1})
+    if clashes:
+        raise InputError(
+            f"the output would have more than one column named {clashes}, from the names of the selected "
+            "columns or the classes of the model; rename them and train again, or predict without shap"
+        )
 
 
 def _check_keep_columns(frame: pl.DataFrame, keep_columns: Sequence[str], outputs: list[str]) -> None:
@@ -167,3 +234,28 @@ def _used_for_training(frame: pl.DataFrame, bundle: dict[str, Any], passed: np.n
     used = np.zeros(frame.height, dtype=bool)
     used[candidates] = np.isin(hashes, training_rows["hashes"])
     return pl.Series(USED_FOR_TRAINING, used)
+
+
+def _evaluation(
+    frame: pl.DataFrame,
+    bundle: dict[str, Any],
+    prediction: tuple[np.ndarray, list[pl.Series]],
+    confusion: Confusion | None,
+) -> list[pl.Series]:
+    # The scores (regression) and the confusion matrix (when asked for), on the rows scored.
+    pipeline = bundle["pipeline"]
+    if is_classifier(pipeline) and confusion is None:
+        return []  # nothing to score, so time_column is not checked
+    passed, predicted = prediction
+    scored = scored_rows(frame, bundle["training_rows"], passed)
+    actual = frame[bundle["training_rows"]["target"]] if scored is not None else None
+    columns = [] if is_classifier(pipeline) else regression_scores(actual, predicted[0].to_numpy(), scored)
+    if confusion is None:
+        return columns
+    if confusion.positive_class is None:
+        values = predicted[0].to_numpy()
+    else:
+        positive = [str(label) for label in pipeline.classes_].index(confusion.positive_class)
+        values = predicted[1 + positive].to_numpy()
+    actual_positive = confusion.actual_positive(actual) if actual is not None else None
+    return [*columns, *confusion_columns(actual_positive, confusion.predicted_positive(values), scored)]
