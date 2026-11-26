@@ -1,4 +1,4 @@
-"""Shared fixtures: a small synthetic data set and a fast config."""
+"""Shared fixtures: a small synthetic data set, a fast config, and a base made from them."""
 
 import shutil
 from collections.abc import Callable, Iterator
@@ -11,7 +11,10 @@ import polars as pl
 import pytest
 
 import mloom.settings
+from mloom.base import Base, load_base
 from mloom.config import Config
+from mloom.optimize import optimize_model
+from mloom.result import Result
 from mloom.settings import SETTINGS_FILE
 
 N_ROWS = 120
@@ -61,6 +64,14 @@ def frame() -> pl.DataFrame:
 
 
 @pytest.fixture
+def data_path(frame: pl.DataFrame, tmp_path: Path) -> Path:
+    """Write the shared frame as Parquet and return its path."""
+    path = tmp_path / "data.parquet"
+    frame.write_parquet(path)
+    return path
+
+
+@pytest.fixture
 def make_config() -> Callable[..., Config]:
     """Build a config that runs fast; keyword arguments override the defaults."""
 
@@ -78,5 +89,18 @@ def make_config() -> Callable[..., Config]:
         }
         values.update(overrides)
         return Config(**values)
+
+    return make
+
+
+@pytest.fixture
+def make_base(
+    frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path
+) -> Callable[..., tuple[Result, Base]]:
+    """Optimize on the shared frame, save to ``<tmp>/base`` and load it as a base; keyword arguments go to the config."""
+
+    def make(**overrides: object) -> tuple[Result, Base]:
+        result = optimize_model(frame, make_config(**overrides))
+        return result, load_base(result.save(tmp_path / "base"))
 
     return make

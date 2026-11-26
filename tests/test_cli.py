@@ -15,14 +15,6 @@ from mloom.cli import EXIT_INPUT, EXIT_OK, main
 from mloom.prediction import predict
 
 
-@pytest.fixture
-def data_path(frame: pl.DataFrame, tmp_path: Path) -> Path:
-    """Write the shared frame as Parquet and return its path."""
-    path = tmp_path / "data.parquet"
-    frame.write_parquet(path)
-    return path
-
-
 def _args(data_path: Path, output: Path, *extra: str) -> list[str]:
     return [
         "optimize",
