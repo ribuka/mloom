@@ -14,7 +14,14 @@ import mloom.training
 from mloom import Config, optimize_model
 from mloom.interpretation import Importance, pls_vip
 from mloom.models import MODELS
-from mloom.pipeline import build_pipeline, fit_preprocess, plan_preprocessing, to_matrix
+from mloom.pipeline import (
+    build_pipeline,
+    fit_preprocess,
+    numeric_preprocess,
+    plan_preprocessing,
+    select_columns,
+    to_matrix,
+)
 from mloom.settings import load_settings
 
 N_ROWS = 150
@@ -168,7 +175,7 @@ def test_coefficients_are_the_change_of_the_output(
     output = pipeline.decision_function if task == "classification" else pipeline.predict
     # The output of 2 classes is that of classes_[1]; a regression has one output without a class.
     classes = [str(label) for label in pipeline.classes_[-1 if target == "c2" else 0 :]] if task == "classification" else [None]
-    scaler = pipeline.named_steps["preprocess"].estimator.named_steps["scale"]
+    scaler = numeric_preprocess(pipeline.named_steps["preprocess"].estimator).named_steps["scale"]
     candidates = result.columns.candidates
     row = scaled[:1]
     before = np.asarray(output(row), dtype=np.float64).reshape(-1)
@@ -204,8 +211,8 @@ def test_vip_ignores_components_left_with_no_weights(make_config: Callable[..., 
     points = np.array([(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] * 4)
     frame = pl.DataFrame({"p": points[:, 0], "q": points[:, 1], "y": points[:, 0]})
     config = make_config(model="pls", exclude_columns=("y",))
-    preprocess = fit_preprocess(plan_preprocessing(config, load_settings(None)), to_matrix(frame, ["p", "q"]))
-    pipeline = build_pipeline(config, {"n_components": 2}, preprocess, [0, 1], ["p", "q"])
+    preprocess = fit_preprocess(plan_preprocessing(config, load_settings(None)), to_matrix(frame, ["p", "q"]), 2)
+    pipeline = build_pipeline(config, {"n_components": 2}, preprocess, [0, 1], select_columns(["p", "q"], [], None))
     pipeline.fit(frame, frame["y"].to_numpy())
     assert np.linalg.norm(pipeline[-1].x_weights_[:, 1]) == 0
     vip = pls_vip(pipeline, frame)

@@ -12,7 +12,13 @@ from typing import Any
 
 import numpy as np
 import optuna
-from optuna.distributions import BaseDistribution, FloatDistribution, IntDistribution
+from optuna.distributions import (
+    BaseDistribution,
+    CategoricalDistribution,
+    FloatDistribution,
+    IntDistribution,
+)
+from sklearn.compose import ColumnTransformer
 from sklearn.metrics import get_scorer
 from sklearn.pipeline import Pipeline
 
@@ -23,10 +29,10 @@ from mloom.data import Data
 from mloom.errors import OptimizationError
 from mloom.fixed_cv import fixed_fold_models, fixed_fold_scores
 from mloom.interpretation import FoldModels, importance_groups
-from mloom.models import K_PARAM, Params
+from mloom.models import K_PARAM, Params, model_params, use_param
 from mloom.pipeline import (
-    Preprocessing,
     build_pipeline,
+    fit_fold_preprocess,
     fit_preprocess,
     plan_preprocessing,
 )
@@ -34,8 +40,8 @@ from mloom.result import Result
 from mloom.selection import (
     correlation_clusters,
     describe_selection,
+    keep_columns,
     rank_columns,
-    top_columns,
 )
 from mloom.settings import load_settings
 from mloom.training import (
@@ -94,21 +100,25 @@ def optimize_model(data: Data, config: Config, *, base: Base | None = None) -> R
         When no trial of the search finished with a score.
     """
     training = prepare_training(data, config, load_settings(config.settings), require_candidates)
+    plan = training.columns
+    n_numeric = len(plan.numeric)
     # The clusters do not use the target, so they come from the statistic rows of the whole period.
-    clusters = correlation_clusters(training.x_statistics, training.settings.selection.max_correlation)
+    clusters = correlation_clusters(training.x_statistics[:, :n_numeric], training.settings.selection.max_correlation)
     # The base is scored before the search, so that an error in it comes before the long part of the run.
     base_scores = None if base is None else _score_base(base, config, training)
-    first = None if base is None else _first_trial(base, config, len(clusters))
+    first = None if base is None else _first_trial(base, config, len(clusters), plan.categorical)
 
     study, prepared = _search(config, training, clusters, first)
     best = study.best_trial
-    k = best.params[K_PARAM]
-    params = {name: value for name, value in best.params.items() if name != K_PARAM}
-    preprocess = fit_preprocess(training.preprocessing, training.x_statistics)
+    params = model_params(best.params)
+    preprocess = fit_preprocess(training.preprocessing, training.x_statistics, n_numeric)
     ranking = rank_columns(config.task, preprocess, training.x, training.y, training.x_statistics, clusters)
-    keep = top_columns(ranking, k)
-    folds = [(fold_preprocess, top_columns(fold_ranking, k)) for fold_preprocess, fold_ranking in prepared]
-    candidates = training.columns.candidates
+    keep = keep_columns(best.params, ranking, plan.categorical, n_numeric)
+    folds = [
+        (fold_preprocess, keep_columns(best.params, fold_ranking, plan.categorical, n_numeric))
+        for fold_preprocess, fold_ranking in prepared
+    ]
+    candidates = plan.candidates
     return fit_final(
         config,
         training,
@@ -147,41 +157,58 @@ def _score_base(base: Base, config: Config, training: TrainingData) -> _BaseScor
     not_compared = [reason for reason, differ in differs.items() if differ]
     if not_compared:
         return _BaseScores(dropped, None, not_compared)
-    params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
+    params = model_params(base.best_params)
     preprocessing = plan_preprocessing(base.config, base.settings)
     models = fixed_fold_models(base.config, params, preprocessing, keep, training)
     return _BaseScores(dropped, fixed_fold_scores(models, training), [])
 
 
-def _first_trial(base: Base, config: Config, n_clusters: int) -> Params | None:
+def _first_trial(base: Base, config: Config, n_clusters: int, categorical: list[str]) -> Params | None:
     # The parameters of the base, when they are in the search space of this run, with k kept within its range.
     if config.model != base.config.model:
         return None
-    params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
-    space = _search_space(config, n_clusters)
+    params = dict(base.best_params)
+    if K_PARAM in params and n_clusters:
+        params[K_PARAM] = min(params[K_PARAM], n_clusters)
+    space = _search_space(config, n_clusters, categorical)
     outside = sorted(
         name for name in params.keys() | space.keys() if name not in space or not _contains(space[name], params.get(name))
     )
     if outside:
-        described = ", ".join(f"{name}={params.get(name)!r}" for name in outside)
+        described = ", ".join(f"{name}={base.best_params.get(name)!r}" for name in outside)
         warnings.warn(
             f"the parameters of the base are not tried first: {described} not in the search space of this run",
             UserWarning,
             stacklevel=3,
         )
         return None
-    return {**params, K_PARAM: min(base.best_params[K_PARAM], n_clusters)}
+    return params
 
 
-def _search_space(config: Config, n_clusters: int) -> dict[str, BaseDistribution]:
+def _search_space(config: Config, n_clusters: int, categorical: list[str]) -> dict[str, BaseDistribution]:
     # The distributions a trial of this run samples from; the values of this throwaway trial are not used.
     trial = optuna.create_study().ask()
-    config.model_spec.suggest(trial, n_clusters)
+    _suggest(trial, config, n_clusters, categorical)
     return trial.distributions
+
+
+def _suggest(trial: optuna.Trial, config: Config, n_clusters: int, categorical: list[str]) -> tuple[Params, Params]:
+    # The hyperparameters of the model, and the parameters of the feature selection (keep_columns).
+    params = config.model_spec.suggest(trial, n_clusters, bool(categorical))
+    if n_clusters == 0:
+        # No numeric candidate: k cannot range from 1 to 0, and every categorical column is kept.
+        return params, {}
+    selection: Params = {K_PARAM: trial.suggest_int(K_PARAM, 1, n_clusters, log=True)}
+    for name in categorical:
+        selection[use_param(name)] = trial.suggest_categorical(use_param(name), [True, False])
+    return params, selection
 
 
 def _contains(distribution: BaseDistribution, value: object) -> bool:
     # Optuna 5.1.0 uses an enqueued value out of its distribution as it is (2026-11-26), so it is checked here.
+    if isinstance(distribution, CategoricalDistribution):
+        # 1 == True in Python, so the type is compared too.
+        return any(type(value) is type(choice) and value == choice for choice in distribution.choices)
     if not isinstance(distribution, FloatDistribution | IntDistribution):
         return False
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -216,31 +243,27 @@ def _differences(ours: list[float], theirs: list[float], config: Config) -> list
 
 def _search(
     config: Config, training: TrainingData, clusters: list[list[int]], first: Params | None
-) -> tuple[optuna.Study, list[tuple[Pipeline, np.ndarray]]]:
+) -> tuple[optuna.Study, list[tuple[ColumnTransformer, np.ndarray]]]:
     # Also returns the fitted preprocessing and the ranking of each fold (``_prepare_fold``).
     x, y, cv_plan = training.x, training.y, training.cv_plan
+    categorical = training.columns.categorical
+    n_numeric = len(training.columns.numeric)
     # Only one representative of each cluster can be selected.
     n_clusters = len(clusters)
     metric = config.metric_spec
     scorer = get_scorer(metric.scorer)
     # Each fold fits the preprocessing and ranks the columns once for every trial.
     prepared = [
-        _prepare_fold(
-            config,
-            training.preprocessing,
-            (x[train], y[train]),
-            training.fold_statistics(train, unlabeled),
-            clusters,
-        )
+        _prepare_fold(config, training, train, unlabeled, clusters)
         for (train, _), unlabeled in zip(cv_plan.folds, cv_plan.unlabeled_folds, strict=True)
     ]
 
     def objective(trial: optuna.Trial) -> float:
-        params = config.model_spec.suggest(trial, n_clusters)
-        k = trial.suggest_int(K_PARAM, 1, n_clusters, log=True)
+        params, selection = _suggest(trial, config, n_clusters, categorical)
         fold_scores = []
         for (train, test), (preprocess, ranking) in zip(cv_plan.folds, prepared, strict=True):
-            pipeline = build_pipeline(config, params, preprocess, top_columns(ranking, k))
+            keep = keep_columns(selection, ranking, categorical, n_numeric)
+            pipeline = build_pipeline(config, params, preprocess, keep)
             score = _score_fold(pipeline, scorer, (x[train], y[train]), (x[test], y[test]))
             fold_scores.append(metric.report_value(score))
         trial.set_user_attr("fold_scores", fold_scores)
@@ -258,15 +281,14 @@ def _search(
 
 
 def _prepare_fold(
-    config: Config,
-    preprocessing: Preprocessing,
-    train: tuple[np.ndarray, np.ndarray],
-    x_statistics: np.ndarray,
-    clusters: list[list[int]],
-) -> tuple[Pipeline, np.ndarray]:
+    config: Config, training: TrainingData, train: np.ndarray, unlabeled: np.ndarray, clusters: list[list[int]]
+) -> tuple[ColumnTransformer, np.ndarray]:
     # The statistics come from the training side; the representatives and their ranking, from its labeled rows only.
-    preprocess = fit_preprocess(preprocessing, x_statistics)
-    return preprocess, rank_columns(config.task, preprocess, *train, x_statistics, clusters)
+    x_statistics = training.fold_statistics(train, unlabeled)
+    preprocess = fit_fold_preprocess(training.preprocessing, x_statistics, len(training.columns.numeric))
+    return preprocess, rank_columns(
+        config.task, preprocess, training.x[train], training.y[train], x_statistics, clusters
+    )
 
 
 def _score_fold(

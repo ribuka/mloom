@@ -11,7 +11,7 @@ from sklearn.metrics import get_scorer
 from mloom.config import Config
 from mloom.interpretation import FoldModels, fit_fold
 from mloom.models import Params
-from mloom.pipeline import Preprocessing, fit_preprocess
+from mloom.pipeline import Preprocessing, fit_fold_preprocess
 from mloom.training import TrainingData
 
 
@@ -25,7 +25,7 @@ def fixed_fold_models(
     config : Config
         The config of the model (its model, task, seed and metric).
     params : Params
-        Hyperparameters of the model, without ``k``.
+        Hyperparameters of the model, without ``k`` and ``use:<column>``.
     preprocessing : Preprocessing
         The preprocessing of the model.
     keep : list[int]
@@ -41,12 +41,13 @@ def fixed_fold_models(
         as in the search of ``optimize_model``.
     """
     cv_plan = training.cv_plan
+    n_numeric = len(training.columns.numeric)
     return FoldModels(
         config,
         params,
         cv_plan.folds,
         [
-            (fit_preprocess(preprocessing, training.fold_statistics(train, unlabeled)), keep)
+            (fit_fold_preprocess(preprocessing, training.fold_statistics(train, unlabeled), n_numeric), keep)
             for (train, _), unlabeled in zip(cv_plan.folds, cv_plan.unlabeled_folds, strict=True)
         ],
     )

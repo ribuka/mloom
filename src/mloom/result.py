@@ -90,6 +90,9 @@ class Result:
     impute : dict[str, Any]
         The imputation of the fitted pipeline: ``{"method": <method>}``, with
         ``"auto"`` resolved for the model (``Preprocessing.impute``).
+    categorical : dict[str, Any]
+        The categories of each categorical candidate column of the fitted
+        pipeline (``mloom.categorical.describe_categorical``).
     columns : ColumnPlan
         The candidate and excluded columns.
     selection : dict[str, Any] | None
@@ -99,7 +102,8 @@ class Result:
     selected_columns : list[str]
         The candidate columns the fitted pipeline uses.
     best_params : dict[str, Any]
-        Best hyperparameters, including ``k`` of the feature selection.
+        Best hyperparameters, including ``k`` and ``use:<column>`` of the
+        feature selection.
     cv_scores : dict[str, Any]
         Metric of each fold of the best trial, with its mean and std.
     interpretation : dict[str, Any]
@@ -142,6 +146,7 @@ class Result:
     settings: Settings
     clip: dict[str, Any]
     impute: dict[str, Any]
+    categorical: dict[str, Any]
     columns: ColumnPlan
     selection: dict[str, Any] | None
     selected_columns: list[str]
@@ -186,7 +191,7 @@ class Result:
                 "not_in_data": self.columns.sensors_not_in_data,
             },
             "settings": self.settings.to_dict(),
-            "preprocessing": {"clip": self.clip, "impute": self.impute},
+            "preprocessing": {"clip": self.clip, "impute": self.impute, "categorical": self.categorical},
             "excluded_columns": [vars(column) for column in self.columns.excluded],
             "candidate_columns": self.columns.candidates,
             "selection": self.selection,

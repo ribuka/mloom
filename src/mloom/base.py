@@ -19,7 +19,7 @@ from mloom.columns import ColumnPlan
 from mloom.config import Config
 from mloom.errors import InputError
 from mloom.model_file import MODEL_FILE, read_run
-from mloom.models import K_PARAM
+from mloom.models import K_PARAM, USE_PREFIX, model_params
 from mloom.settings import Settings, settings_from_record
 
 _NONE = type(None)
@@ -47,7 +47,8 @@ class Base:
     selected_columns : list[str]
         The columns the model of the base uses.
     best_params : dict[str, Any]
-        The hyperparameters of the model of the base, with ``k``.
+        The hyperparameters of the model of the base, with ``k`` and
+        ``use:<column>`` of the feature selection.
     """
 
     path: str | Path
@@ -119,11 +120,9 @@ def _base(path: str | Path, record: dict[str, Any]) -> Base:
         **search,
     )
     best_params = _value(record, "best_params", (dict,))
-    k = _value(record, f"best_params.{K_PARAM}", (int,))
-    if k < 1:
-        raise InputError(f"best_params.{K_PARAM} must be 1 or more; got {k}")
+    _check_selection_params(record, best_params)
     try:
-        config.model_spec.check_params({name: value for name, value in best_params.items() if name != K_PARAM})
+        config.model_spec.check_params(model_params(best_params))
     except InputError as error:
         raise InputError(f"best_params does not fit: {error}") from error
     # Copied to the record of the refit.
@@ -137,6 +136,17 @@ def _base(path: str | Path, record: dict[str, Any]) -> Base:
         selected_columns=_names(record, "selected_columns"),
         best_params=best_params,
     )
+
+
+def _check_selection_params(record: dict[str, Any], best_params: dict[str, Any]) -> None:
+    # k is not there without a numeric candidate; use:<column> is there for each categorical candidate.
+    if K_PARAM in best_params:
+        k = _value(record, f"best_params.{K_PARAM}", (int,))
+        if k < 1:
+            raise InputError(f"best_params.{K_PARAM} must be 1 or more; got {k}")
+    for name, value in best_params.items():
+        if name.startswith(USE_PREFIX) and not isinstance(value, bool):
+            raise InputError(f"best_params.{name} must be bool; got {value!r}")
 
 
 def _value(record: dict[str, Any], key: str, kinds: tuple[type, ...]) -> Any:  # noqa: ANN401 - one of kinds

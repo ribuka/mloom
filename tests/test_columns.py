@@ -47,6 +47,58 @@ def test_each_column_gets_its_reason(frame: pl.DataFrame, make_config: Callable[
     assert plan.sensors_not_in_data == ["gone"]
 
 
+@pytest.mark.parametrize(("model", "categorical"), [("lightgbm", True), ("ridge", False), ("pls", False), ("random_forest", False)])
+def test_string_columns_are_categorical_candidates_of_lightgbm_only(
+    make_config: Callable[..., Config], model: str, categorical: bool
+) -> None:
+    """String, Categorical and Enum columns follow the numeric candidates for ``lightgbm``, and are ``non_numeric`` otherwise."""
+    values = ["a", "b", None, "c"] * 5
+    frame = pl.DataFrame(
+        {
+            "enum": pl.Series(values, dtype=pl.Enum(["a", "b", "c"])),
+            "x": np.arange(20.0),
+            "string": values,
+            "flag": [True, False] * 10,
+            "category": pl.Series(values, dtype=pl.Categorical),
+            "y": np.arange(20.0),
+        }
+    )
+    plan = plan_columns(frame, frame.clear(), make_config(model=model), NO_SENSORS, 0.5)
+    strings = ["enum", "string", "category"]
+    assert plan.numeric == ["x", "flag"]
+    assert plan.categorical == (strings if categorical else [])
+    assert plan.candidates == ["x", "flag", *plan.categorical]
+    reasons = {column.name: column.reason for column in plan.excluded}
+    non_numeric = {} if categorical else dict.fromkeys(strings, "non_numeric")
+    assert reasons == {"y": "target", **non_numeric}
+
+
+def test_categorical_candidates_get_the_reasons_of_their_values(make_config: Callable[..., Config]) -> None:
+    """A string column that is all null, has one value apart from null, or misses too many values is excluded."""
+    labeled = pl.DataFrame(
+        {
+            "empty": pl.Series([None] * 10, dtype=pl.String),
+            "one": pl.Series(["a", None] * 5, dtype=pl.Categorical),
+            "sparse": ["a", "b", None, None, None, None, None, None, None, None],
+            # Not too many missing in the labeled rows (0.4), but too many with the unlabeled ones (0.7).
+            "sparse_unlabeled": ["a", "b", "c", "d", "e", "f", None, None, None, None],
+            "kept": ["a", "b"] * 5,
+            "y": np.arange(10.0),
+        }
+    )
+    unlabeled = labeled.with_columns(sparse_unlabeled=pl.lit(None, dtype=pl.String), y=pl.lit(None, dtype=pl.Float64))
+    plan = plan_columns(labeled, unlabeled, make_config(model="lightgbm"), NO_SENSORS, 0.5)
+    reasons = {column.name: column.reason for column in plan.excluded}
+    assert reasons == {
+        "empty": "all_null",
+        "one": "constant",
+        "sparse": "high_missing",
+        "sparse_unlabeled": "high_missing",
+        "y": "target",
+    }
+    assert plan.categorical == ["kept"]
+
+
 def test_unavailable_sensor_keeps_its_reason(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
     """The reason in the JSON file is kept as the detail."""
     plan = plan_columns(frame, frame.clear(), make_config(), _sensors(s0="故障"), 0.5)

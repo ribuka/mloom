@@ -1,18 +1,20 @@
 """Tests of ``optimize_model`` and of the pipeline it saves."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import polars as pl
 import pytest
+from lightgbm import LGBMModel
 
 import mloom.optimize
 import mloom.training
 from mloom import Config, InputError, optimize_model, read_run
 from mloom.cv import CVPlan, plan_cv
 from mloom.models import MODELS
+from mloom.pipeline import numeric_preprocess
 from mloom.prediction import load_model
 from mloom.selection import rank_columns
 
@@ -58,6 +60,9 @@ def test_every_model_fits_saves_and_predicts(
     assert run["task"] == task
     assert set(run["selected_columns"]) <= set(run["candidate_columns"])
     assert len(run["selected_columns"]) == run["best_params"]["k"]
+    # Without a categorical candidate, nothing of the categorical columns is searched or recorded.
+    assert not any(name == "cat_smooth" or name.startswith("use:") for name in run["best_params"])
+    assert run["preprocessing"]["categorical"] == {}
     assert run["best_params"].get("n_components", 1) <= run["selection"]["n_clusters"]
     assert len(run["cv_scores"]["folds"]) == 3
 
@@ -181,7 +186,7 @@ def test_unlabeled_rows_join_the_preprocessing(
     result = optimize_model(data, make_config(model="pls", settings=settings))
 
     statistic_rows = data if use_unlabeled else frame
-    preprocess = result.pipeline.named_steps["preprocess"].estimator
+    preprocess = numeric_preprocess(result.pipeline.named_steps["preprocess"].estimator)
     s0 = result.columns.candidates.index("s0")
     assert preprocess.named_steps["scale"].mean_[s0] == pytest.approx(statistic_rows["s0"].mean())
     assert preprocess.named_steps["impute"].statistics_[s0] == pytest.approx(statistic_rows["s0"].median())
@@ -252,7 +257,7 @@ def test_train_filters_leave_rows_out_of_training_and_statistics(
     assert run["data"]["n_rows_used"] == statistic_rows["y"].is_not_null().sum()
     assert run["data"]["n_unlabeled_rows_used"] == statistic_rows["y"].is_null().sum()
     assert run["data"]["n_rows_without_target"] == statistic_rows["y"].is_null().sum()
-    preprocess = result.pipeline.named_steps["preprocess"].estimator
+    preprocess = numeric_preprocess(result.pipeline.named_steps["preprocess"].estimator)
     s0 = result.columns.candidates.index("s0")
     assert preprocess.named_steps["impute"].statistics_[s0] == pytest.approx(statistic_rows["s0"].median())
     assert preprocess.named_steps["scale"].mean_[s0] == pytest.approx(statistic_rows["s0"].mean())
@@ -339,7 +344,7 @@ def test_each_imputation_fits_and_predicts(
     """
     settings = _settings(tmp_path, f"[impute]\nmethod = '{method}'\n")
     result = optimize_model(with_missing, make_config(model=model, settings=settings))
-    preprocess = result.pipeline.named_steps["preprocess"].estimator
+    preprocess = numeric_preprocess(result.pipeline.named_steps["preprocess"].estimator)
     assert ("impute" in preprocess.named_steps) is (resolved != "none")
     assert np.isfinite(result.pipeline.predict(with_missing)).all()
     run = result.to_dict()
@@ -406,3 +411,98 @@ def test_columns_are_ranked_on_the_labeled_training_rows_only(
     for (train, _), x in zip(plan.folds, ranked, strict=False):
         np.testing.assert_array_equal(x[:, t], times[train])
     np.testing.assert_array_equal(ranked[-1][:, t], times)
+
+
+def _categorical_splits(model: LGBMModel, position: int) -> set[str]:
+    # The decision types of the splits of a LightGBM model on a column of its input.
+    def walk(node: dict) -> Iterator[tuple[int, str]]:
+        if "split_feature" in node:
+            yield node["split_feature"], node["decision_type"]
+            yield from walk(node["left_child"])
+            yield from walk(node["right_child"])
+
+    trees = model.booster_.dump_model()["tree_info"]
+    return {kind for tree in trees for feature, kind in walk(tree["tree_structure"]) if feature == position}
+
+
+@pytest.mark.parametrize(("task", "target"), [("regression", "y"), ("classification", "c2"), ("classification", "c3")])
+def test_lightgbm_learns_a_string_column_as_categorical(
+    graded: pl.DataFrame, make_config: Callable[..., Config], task: str, target: str
+) -> None:
+    """A string column that drives the target is a categorical candidate whose use is searched with ``cat_smooth``.
+
+    When the search uses it, the final model splits on its categories.
+    """
+    config = make_config(model="lightgbm", task=task, target=target, exclude_columns=("t", "shift", "y", "c2", "c3"))
+    result = optimize_model(graded, config)
+    run = result.to_dict()
+    assert run["candidate_columns"] == ["x1", "grade"]
+    assert {"k", "use:grade", "cat_smooth"} <= set(run["best_params"])
+    assert ("grade" in run["selected_columns"]) is run["best_params"]["use:grade"]
+    assert len([name for name in run["selected_columns"] if name != "grade"]) == run["best_params"]["k"]
+    assert run["preprocessing"]["categorical"] == {"grade": {"n_categories": 4}}
+    if run["best_params"]["use:grade"]:
+        assert "==" in _categorical_splits(result.pipeline[-1], result.selected_columns.index("grade"))
+    assert np.isfinite(result.pipeline.predict_proba(graded) if task == "classification" else result.pipeline.predict(graded)).all()
+
+
+def test_string_column_with_many_values_is_used_as_it_is(make_config: Callable[..., Config]) -> None:
+    """A string column of 300 values is trained on without merging any of them."""
+    rng = np.random.default_rng(8)
+    n_rows = 1500
+    lot = rng.permutation(np.arange(n_rows) % 300)
+    x1 = rng.normal(size=n_rows)
+    data = pl.DataFrame({"x1": x1, "lot": [f"L{i:03d}" for i in lot], "y": x1 + (lot % 7) + rng.normal(scale=0.1, size=n_rows)})
+    result = optimize_model(data, make_config(model="lightgbm", exclude_columns=(), n_trials=2))
+    assert result.to_dict()["preprocessing"]["categorical"] == {"lot": {"n_categories": 300}}
+
+
+def test_string_column_all_null_on_the_training_side_of_a_fold_fails_no_trial(
+    graded: pl.DataFrame, make_config: Callable[..., Config]
+) -> None:
+    """A string column null on the first period, the whole training side of the first time series fold, fails no trial."""
+    data = graded.with_columns(grade=pl.when(pl.col("t") < 200).then(None).otherwise(pl.col("grade")))
+    # Without a numeric candidate, every trial uses the categorical columns.
+    config = make_config(model="lightgbm", cv="timeseries", time_column="t", exclude_columns=("x1", "y", "c2", "c3"))
+    result = optimize_model(data, config)
+    assert result.cv["folds"][0]["n_train"] == 200
+    assert result.hpo is not None
+    assert result.hpo["n_trials_failed"] == 0
+    assert result.selected_columns == ["grade", "shift"]
+
+
+def test_only_categorical_candidates_are_all_used_without_k(
+    graded: pl.DataFrame, make_config: Callable[..., Config]
+) -> None:
+    """Without a numeric candidate, neither ``k`` nor ``use:`` is searched, and every categorical column is used."""
+    result = optimize_model(graded, make_config(model="lightgbm", exclude_columns=("t", "x1", "y", "c2", "c3")))
+    assert result.columns.candidates == ["grade", "shift"]
+    assert result.selected_columns == ["grade", "shift"]
+    assert not any(name == "k" or name.startswith("use:") for name in result.best_params)
+    assert "cat_smooth" in result.best_params
+    assert result.to_dict()["selection"]["n_clusters"] == 0
+
+
+@pytest.mark.parametrize("clip", ["quantile", "iqr", "mad", "sigma"])
+def test_only_categorical_candidates_train_with_any_clipping_and_imputation(
+    graded: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, clip: str
+) -> None:
+    """Without a numeric candidate, every clipping and an imputation leave the categorical columns to the model."""
+    settings = _settings(tmp_path, f"[clip]\nmethod = '{clip}'\n[impute]\nmethod = 'knn'\n")
+    config = make_config(model="lightgbm", exclude_columns=("t", "x1", "y", "c2", "c3"), settings=settings)
+    result = optimize_model(graded, config)
+    assert result.selected_columns == ["grade", "shift"]
+    assert result.to_dict()["preprocessing"]["clip"] == {"method": clip, "bounds": {}, "unclipped_columns": []}
+    assert np.isfinite(result.pipeline.predict(graded)).all()
+
+
+def test_same_seed_gives_same_result_with_categorical_columns(
+    graded: pl.DataFrame, make_config: Callable[..., Config]
+) -> None:
+    """Two runs with categorical columns and the same seed give the same columns and parameters."""
+    config = make_config(model="lightgbm", exclude_columns=("y", "c2", "c3"))
+    first, second = optimize_model(graded, config), optimize_model(graded, config)
+    assert {"use:grade", "use:shift", "cat_smooth"} <= set(first.best_params)
+    assert first.selected_columns == second.selected_columns
+    assert first.best_params == second.best_params
+    assert first.cv_scores == second.cv_scores

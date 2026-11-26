@@ -64,6 +64,33 @@ def frame() -> pl.DataFrame:
 
 
 @pytest.fixture
+def graded() -> pl.DataFrame:
+    """Rows in time order with a number ``x1``, a String ``grade`` of 4 values and a Categorical ``shift`` of 2.
+
+    ``y`` (numeric), ``c2`` (two classes) and ``c3`` (three classes) depend on ``x1``, ``grade`` and ``shift``;
+    ``grade`` drives them most. Each value of ``grade`` has about 200 rows, enough for LightGBM to split on it.
+    """
+    rng = np.random.default_rng(5)
+    n_rows = 800
+    x1 = rng.normal(size=n_rows)
+    grade = rng.choice(["A", "B", "C", "D"], size=n_rows)
+    shift = rng.choice(["day", "night"], size=n_rows)
+    effect = np.select([grade == value for value in "ABC"], [-3.0, -1.0, 1.0], 3.0) + np.where(shift == "day", 0.5, -0.5)
+    y = x1 + effect + rng.normal(scale=0.3, size=n_rows)
+    return pl.DataFrame(
+        {
+            "t": np.arange(n_rows),
+            "x1": x1,
+            "grade": grade,
+            "shift": pl.Series(shift, dtype=pl.Categorical),
+            "y": y,
+            "c2": np.where(y > 0, "pos", "neg"),
+            "c3": np.select([y < -1.5, y < 1.5], ["low", "mid"], "high"),
+        }
+    )
+
+
+@pytest.fixture
 def data_path(frame: pl.DataFrame, tmp_path: Path) -> Path:
     """Write the shared frame as Parquet and return its path."""
     path = tmp_path / "data.parquet"
@@ -97,10 +124,13 @@ def make_config() -> Callable[..., Config]:
 def make_base(
     frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path
 ) -> Callable[..., tuple[Result, Base]]:
-    """Optimize on the shared frame, save to ``<tmp>/base`` and load it as a base; keyword arguments go to the config."""
+    """Optimize on the shared frame (or ``data``), save to ``<tmp>/base`` and load it as a base.
 
-    def make(**overrides: object) -> tuple[Result, Base]:
-        result = optimize_model(frame, make_config(**overrides))
+    The other keyword arguments go to the config.
+    """
+
+    def make(data: pl.DataFrame | None = None, **overrides: object) -> tuple[Result, Base]:
+        result = optimize_model(frame if data is None else data, make_config(**overrides))
         return result, load_base(result.save(tmp_path / "base"))
 
     return make

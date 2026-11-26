@@ -16,6 +16,17 @@ from mloom.base import check_output
 from mloom.models import MODELS
 from mloom.settings import settings_from_record
 
+FOREST_PARAMS = {"n_estimators": 100, "max_depth": 4, "min_samples_leaf": 2, "max_features": 0.5}
+LIGHTGBM_PARAMS = {
+    "num_leaves": 16,
+    "learning_rate": 0.1,
+    "n_estimators": 100,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+}
+
 
 @pytest.fixture
 def base_path(frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path) -> Path:
@@ -123,7 +134,6 @@ def _without(record: dict[str, Any], key: str) -> dict[str, Any]:
         "hpo.timeout",
         "selected_columns",
         "best_params",
-        "best_params.k",
         "created_at",
         "cv_scores",
         "settings",
@@ -172,6 +182,8 @@ def test_invalid_value_raises_with_the_version(
         ({"k": 2, "alpha": 1.0, "max_depth": 3}, "unknown max_depth"),
         ({"k": 0, "alpha": 1.0}, "best_params.k must be 1 or more"),
         ({"k": 2.0, "alpha": 1.0}, "best_params.k must be int"),
+        ({"k": 2, "alpha": 1.0, "use:lot": 1}, "best_params.use:lot must be bool"),
+        ({"k": 2, "alpha": 1.0, "cat_smooth": 1.0}, "unknown cat_smooth"),
     ],
 )
 def test_parameters_that_do_not_fit_the_model_raise(
@@ -197,6 +209,9 @@ def test_parameters_that_do_not_fit_the_model_raise(
         ),
         ("pls", {"n_components": 20}, None),
         ("pls", {"n_components": True}, "n_components must be int"),
+        ("lightgbm", {**LIGHTGBM_PARAMS, "cat_smooth": 1.0}, None),
+        ("lightgbm", {**LIGHTGBM_PARAMS, "cat_smooth": 1000.0}, "out of the range"),
+        ("random_forest", {**FOREST_PARAMS, "cat_smooth": 1.0}, "unknown cat_smooth"),
     ],
 )
 def test_check_params_follows_the_search_space(model: str, params: dict[str, Any], match: str | None) -> None:

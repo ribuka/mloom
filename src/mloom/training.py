@@ -14,8 +14,10 @@ from typing import Any
 
 import numpy as np
 import polars as pl
-from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OrdinalEncoder
 
+from mloom.categorical import describe_categorical, encode, fit_encoder
 from mloom.clip import describe_clip
 from mloom.columns import ColumnPlan, check_columns, check_role_values, plan_columns
 from mloom.config import Config
@@ -37,6 +39,7 @@ from mloom.pipeline import (
     build_pipeline,
     fitted_clip_bounds,
     plan_preprocessing,
+    select_columns,
     to_matrix,
 )
 from mloom.result import DataSummary, Result
@@ -67,8 +70,12 @@ class TrainingData:
         The target of ``rows``.
     columns : ColumnPlan
         The candidate and excluded columns.
+    encoder : OrdinalEncoder | None
+        The encoder of the categorical candidates, fitted on the statistic
+        rows (``mloom.categorical.fit_encoder``); ``None`` without them.
     x : np.ndarray
-        The candidate columns of ``rows`` (``to_matrix``).
+        The candidate columns of ``rows``: the numeric ones (``to_matrix``),
+        then the codes of the categorical ones (``mloom.categorical.encode``).
     x_unlabeled : np.ndarray
         The candidate columns of the unlabeled rows used for the statistics.
     x_statistics : np.ndarray
@@ -85,6 +92,7 @@ class TrainingData:
     rows: pl.DataFrame
     y: np.ndarray
     columns: ColumnPlan
+    encoder: OrdinalEncoder | None
     x: np.ndarray
     x_unlabeled: np.ndarray
     x_statistics: np.ndarray
@@ -156,8 +164,9 @@ def prepare_training(
     y = _target(rows, config)
     columns = plan_columns(rows, training.unlabeled, config, sensors, settings.columns.max_missing_rate)
     check_plan(columns)
-    x = to_matrix(rows, columns.candidates)
-    x_unlabeled = to_matrix(training.unlabeled, columns.candidates)
+    encoder = fit_encoder([rows, training.unlabeled], columns.categorical) if columns.categorical else None
+    x = _features(rows, columns, encoder)
+    x_unlabeled = _features(training.unlabeled, columns, encoder)
     return TrainingData(
         summary=DataSummary(
             path=path,
@@ -177,11 +186,16 @@ def prepare_training(
         rows=rows,
         y=y,
         columns=columns,
+        encoder=encoder,
         x=x,
         x_unlabeled=x_unlabeled,
         x_statistics=np.vstack([x, x_unlabeled]),
         cv_plan=plan_cv(rows, y, training.unlabeled, config),
     )
+
+
+def _features(frame: pl.DataFrame, columns: ColumnPlan, encoder: OrdinalEncoder | None) -> np.ndarray:
+    return np.hstack([to_matrix(frame, columns.numeric), encode(encoder, frame, columns.categorical)])
 
 
 def _target(rows: pl.DataFrame, config: Config) -> np.ndarray:
@@ -204,8 +218,9 @@ class FinalModel:
 
     Parameters
     ----------
-    preprocess : Pipeline
-        The preprocessing fitted on ``TrainingData.x_statistics``.
+    preprocess : ColumnTransformer
+        The preprocessing fitted on ``TrainingData.x_statistics``
+        (``mloom.pipeline.fit_preprocess``).
     keep : list[int]
         Positions, among the candidate columns, of the columns the model
         uses, in the order of the input of the estimator.
@@ -217,7 +232,7 @@ class FinalModel:
         (``mloom.interpretation.permutation_importance``).
     """
 
-    preprocess: Pipeline
+    preprocess: ColumnTransformer
     keep: list[int]
     fold_models: FoldModels
     importance_groups: list[tuple[int, list[int]]]
@@ -260,8 +275,10 @@ def fit_final(
     Result
         The fitted pipeline and the record of the run.
     """
-    candidates = training.columns.candidates
-    pipeline = build_pipeline(config, final.fold_models.params, final.preprocess, final.keep, candidates)
+    plan = training.columns
+    candidates = plan.candidates
+    columns = select_columns(plan.numeric, plan.categorical, training.encoder)
+    pipeline = build_pipeline(config, final.fold_models.params, final.preprocess, final.keep, columns)
     pipeline.fit(training.rows, training.y)
     background = shap_background(pipeline, training.rows)
     importance = permutation_importance(
@@ -280,9 +297,10 @@ def fit_final(
         clip=describe_clip(
             training.settings.clip.method,
             fitted_clip_bounds(final.preprocess),
-            candidates,
+            plan.numeric,
         ),
         impute={"method": training.preprocessing.impute},
+        categorical=describe_categorical(training.encoder, plan.categorical),
         columns=training.columns,
         selected_columns=[candidates[i] for i in final.keep],
         cv_scores=describe_scores(fold_scores),

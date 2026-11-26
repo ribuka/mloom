@@ -66,8 +66,11 @@ def clip_bounds(x: np.ndarray, settings: ClipSettings) -> Bounds:
     -------
     Bounds
         Lower and upper bounds, one value for each column; -inf and +inf for
-        a column that is not clipped.
+        a column that is not clipped. Empty for no column (a run whose
+        candidates are all categorical).
     """
+    if x.shape[1] == 0:  # the quantiles of no column cannot be unpacked
+        return np.empty(0), np.empty(0)
     with warnings.catch_warnings():
         # A column without a finite value gives NaN bounds, and is not clipped below.
         warnings.simplefilter("ignore", RuntimeWarning)
