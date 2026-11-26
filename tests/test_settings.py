@@ -33,6 +33,7 @@ def test_repository_defaults_set_every_key() -> None:
         },
         "impute": {"method": "auto", "fill_value": 0.0, "n_neighbors": 5},
         "selection": {"max_correlation": 0.9},
+        "importance": {"n_repeats": 5},
     }
 
 
@@ -120,6 +121,10 @@ def test_wheel_reads_the_packaged_defaults(monkeypatch: pytest.MonkeyPatch, tmp_
         ("[selection]\nmax_correlation = 1.5\n", "from 0 to 1"),
         ('[selection]\nmax_correlation = "0.9"\n', "from 0 to 1"),
         ("[selection]\nmax_correlation = true\n", "from 0 to 1"),
+        ("[importance]\nn_repeats = -1\n", r"\[importance\] n_repeats .* integer of 0 or more"),
+        ("[importance]\nn_repeats = 1.5\n", "integer of 0 or more"),
+        ("[importance]\nn_repeats = true\n", "integer of 0 or more"),
+        ('[importance]\nn_repeats = "5"\n', "integer of 0 or more"),
     ],
 )
 @pytest.mark.parametrize("layer", ["project", "local_defaults"])

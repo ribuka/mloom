@@ -60,6 +60,12 @@ def _count(value: object) -> int:
     return value
 
 
+def _non_negative_count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"must be an integer of 0 or more; got {value!r}")
+    return value
+
+
 def _flag(value: object) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"must be true or false; got {value!r}")
@@ -164,6 +170,20 @@ class SelectionSettings:
     max_correlation: float
 
 
+@dataclass(frozen=True)
+class ImportanceSettings:
+    """``[importance]``: the permutation importance (see "解釈" in ``docs/spec.md``).
+
+    Parameters
+    ----------
+    n_repeats : int
+        How many times each group of columns is permuted on the test side of
+        each CV fold; 0 does not compute the permutation importance.
+    """
+
+    n_repeats: int
+
+
 # Table → (its settings, key → check that returns the value).
 _TABLES: dict[str, tuple[Callable[..., Any], dict[str, Check]]] = {
     "columns": (ColumnSettings, {"max_missing_rate": _rate}),
@@ -184,6 +204,7 @@ _TABLES: dict[str, tuple[Callable[..., Any], dict[str, Check]]] = {
         {"method": _one_of(IMPUTE_METHODS), "fill_value": _number, "n_neighbors": _count},
     ),
     "selection": (SelectionSettings, {"max_correlation": _rate}),
+    "importance": (ImportanceSettings, {"n_repeats": _non_negative_count}),
 }
 
 
@@ -222,6 +243,8 @@ class Settings:
         ``[impute]``.
     selection : SelectionSettings
         ``[selection]``.
+    importance : ImportanceSettings
+        ``[importance]``.
     sources : dict[str, dict[str, str]]
         Path of the file each key was read from, by table and key.
     files : list[SettingsFile]
@@ -233,6 +256,7 @@ class Settings:
     clip: ClipSettings
     impute: ImputeSettings
     selection: SelectionSettings
+    importance: ImportanceSettings
     sources: dict[str, dict[str, str]]
     files: list[SettingsFile]
 

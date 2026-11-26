@@ -100,6 +100,17 @@ def test_invalid_max_correlation_exits_with_2(data_path: Path, tmp_path: Path, c
     assert not (tmp_path / "out").exists()
 
 
+def test_invalid_importance_repeats_exit_with_2(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A negative ``[importance] n_repeats`` stops with exit code 2 and saves nothing."""
+    settings = tmp_path / "mloom.toml"
+    settings.write_text("[importance]\nn_repeats = -1\n", encoding="utf-8")
+    assert main(_args(data_path, tmp_path / "out", "--settings", str(settings))) == EXIT_INPUT
+    assert "error: [importance] n_repeats" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
 # The removed gradient boosting, joined so that it does not remain in the sources.
 @pytest.mark.parametrize("model", ["svm", "hist_gradient" + "_boosting"])
 def test_invalid_arguments_exit_with_2(data_path: Path, tmp_path: Path, model: str) -> None:

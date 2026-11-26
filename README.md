@@ -61,7 +61,7 @@ uv run mloom show outputs/quality-lgbm/model.pkl
 ```
 
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
-- 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式、似た列をまとめる相関のしきい値（`[selection] max_correlation`）を変えられます（下の「前処理」「特徴量選択」）。
+- 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式、似た列をまとめる相関のしきい値（`[selection] max_correlation`）、permutation importance の繰り返し回数（`[importance] n_repeats`）を変えられます（下の「前処理」「特徴量選択」「解釈」）。
 - `unavailable-sensors.json` と `mloom.toml` は、mloom を使う側のリポジトリの `config/` に置きます。
 
 ## 設定の既定値
@@ -104,6 +104,16 @@ uv run mloom show outputs/quality-lgbm/model.pkl
 - スピアマンの |ρ| が `[selection] max_correlation`（既定 0.9）を超える列どうしはクラスタにまとめ、各クラスタからは代表 1 列（CV の分割ごとに、学習側で F 統計量が最大の列）だけを採用の候補にします。似た列の両方が採用されることはありません。`max_correlation = 1` にすると何もまとめません。
 - クラスタは記録の `selection` に残ります。`n_clusters` はクラスタの数、`clusters` は 2 列以上のクラスタごとの列（`columns`）、最終モデルの代表（`representative`）、その代表が採用されたか（`selected`）です。代表でない列も候補列のままで、前処理には使われます。
 
+## 解釈
+
+`mloom optimize` は、モデルの解釈の材料を記録の `interpretation`（Python API では `Result.interpretation`）に残します。
+
+- `permutation_importance`: 採用した列ごとの重要度です。その列を含む似た列のクラスタ（「特徴量選択」）をまとめて 1 つのグループとし、CV の各分割で、最良の試行のモデルを学習し直し、評価側の行でグループの列を並べ替えたときに指標がどれだけ悪くなるかを測ります。正の値が「入れ替えると悪くなる＝効いている」で、指標の単位のままです。`groups` は `mean` の降順で、`column`（採用した列）、`columns`（並べ替えた列）、`mean`・`std`（分割の間の平均と母標準偏差）、`folds`（分割ごとの値）を持ちます。
+  - 並べ替える回数は `config/mloom.toml` の `[importance] n_repeats`（既定 5。0 以上の整数）です。0 にすると計算せず `null` になり、分割ごとの学習もしません。
+  - 分割ごとの学習と、「グループ数 × `n_repeats` × 分割数」回の予測のぶん、実行が長くなります。
+- `coefficients`（`ridge`・`pls`）: 最終モデルで、採用した列を元の単位で 1 だけ動かしたときの出力の変化（`per_unit`）と、1 標準偏差だけ動かしたときの変化（`per_std`）です。出力は、回帰は予測値（`output` が `"prediction"`）、分類は対数オッズ（`"log_odds"`。2 値は `classes_[1]`、多値はクラスごとに `class` を付けます）。ほかの列を固定し、クリップの上下限の中で成り立つ値です。木のモデルでは `null` です。
+- `vip`（`pls`）: 最終モデルの PLS の VIP です。`pls` 以外では `null` です。
+
 ## Python API
 
 ```python
@@ -122,6 +132,7 @@ result = mloom.optimize_model(
     ),
 )
 print(result.cv_scores, result.selected_columns)
+print(result.interpretation)  # 重要度・係数・VIP（「解釈」）
 result.save("outputs/quality-ridge")  # outputs/quality-ridge/model.pkl を返す
 run = mloom.read_run("outputs/quality-ridge/model.pkl")  # 記録の辞書（mloom show と同じ内容）
 ```

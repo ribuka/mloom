@@ -100,6 +100,12 @@ class Result:
         Best hyperparameters, including ``k`` of the feature selection.
     cv_scores : dict[str, Any]
         Metric of each fold of the best trial, with its mean and std.
+    interpretation : dict[str, Any]
+        ``permutation_importance`` of each group of similar columns on the
+        test side of the CV folds (``mloom.interpretation.permutation_importance``),
+        ``coefficients`` of a linear model (``linear_coefficients``) and
+        ``vip`` of PLS (``pls_vip``); each is ``None`` when it does not
+        apply.
     cv : dict[str, Any]
         Description of the CV split.
     hpo : dict[str, Any]
@@ -131,6 +137,7 @@ class Result:
     selected_columns: list[str]
     best_params: dict[str, Any]
     cv_scores: dict[str, Any]
+    interpretation: dict[str, Any]
     cv: dict[str, Any]
     hpo: dict[str, Any]
     created_at: str
@@ -175,6 +182,7 @@ class Result:
             "hpo": self.hpo,
             "best_params": self.best_params,
             "cv_scores": self.cv_scores,
+            "interpretation": self.interpretation,
             "versions": _versions(),
         }
 
