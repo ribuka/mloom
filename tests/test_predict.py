@@ -181,14 +181,10 @@ def test_model_path_and_dict_agree(data: pl.DataFrame, trained: Result, tmp_path
     assert mloom.predict is predict
 
 
-@pytest.mark.parametrize(("content", "message"), [(None, "model file not found"), ([1], "must be a dict")])
-def test_invalid_model_raises(data: pl.DataFrame, tmp_path: Path, content: object, message: str) -> None:
-    """A missing file, or a pickle that is not a model of mloom, raises ``InputError``."""
-    path = tmp_path / "model.pkl"
-    if content is not None:
-        path.write_bytes(pickle.dumps(content))
-    with pytest.raises(InputError, match=message):
-        predict(path, data)
+def test_invalid_model_dict_raises(data: pl.DataFrame) -> None:
+    """A dict without the keys of the model of a model.pkl raises ``InputError``."""
+    with pytest.raises(InputError, match="must be a dict with the keys"):
+        predict({"pipeline": None}, data)
 
 
 _WITHOUT_MLOOM = """
@@ -201,6 +197,7 @@ import numpy as np
 import polars as pl
 
 with open(sys.argv[1], "rb") as file:
+    run = pickle.load(file)
     bundle = pickle.load(file)
 np.save(sys.argv[3], bundle["pipeline"].predict(pl.read_parquet(sys.argv[2])))
 """
@@ -237,7 +234,9 @@ def test_model_pkl_is_read_and_predicts_without_mloom(
     result = optimize_model(data, make_config(model=model, task=task, target=target, settings=settings_path))
     result.save(tmp_path)
     data.write_parquet(tmp_path / "data.parquet")
-    assert b"mloom" not in (tmp_path / "model.pkl").read_bytes()
+    with (tmp_path / "model.pkl").open("rb") as file:
+        pickle.load(file)
+        assert b"mloom" not in file.read()
 
     out = tmp_path / "predictions.npy"
     paths = [str(tmp_path / "model.pkl"), str(tmp_path / "data.parquet"), str(out)]

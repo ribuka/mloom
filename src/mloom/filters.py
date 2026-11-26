@@ -2,8 +2,9 @@
 
 See "行のフィルタ" in ``docs/spec.md``. A filter is a list of conditions
 ``{"column", "op", "value"}`` that are combined with AND. The definition is
-plain data (no polars expression), so that ``run.json`` and ``model.pkl``
-hold it as it was given and a reader needs neither mloom nor polars.
+plain data (no polars expression), so that the record and the model in
+``model.pkl`` hold it as it was given and a reader needs neither mloom nor
+polars.
 """
 
 import json

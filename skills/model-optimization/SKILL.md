@@ -1,6 +1,6 @@
 ---
 name: model-optimization
-description: Optimize a machine-learning model on a Parquet file with mloom - exclude unavailable sensors, select features, tune hyperparameters with CV, and save the fitted pipeline as model.pkl with run.json - or predict a Parquet file with a saved model.pkl (scores, confusion matrix, SHAP contributions), then explain the result. Use when the user asks to build, tune, or optimize a regression or classification model (ridge, pls, random_forest, hist_gradient_boosting) on Parquet data, or to predict with a model mloom saved, e.g. "この Parquet で品質を予測するモデルを最適化して", "hist_gradient_boosting で特徴量選択とハイパラ探索をして", "この model.pkl で新しいデータを予測して".
+description: Optimize a machine-learning model on a Parquet file with mloom - exclude unavailable sensors, select features, tune hyperparameters with CV, and save the fitted pipeline with the record of the run as model.pkl - or predict a Parquet file with a saved model.pkl (scores, confusion matrix, SHAP contributions), then explain the result. Use when the user asks to build, tune, or optimize a regression or classification model (ridge, pls, random_forest, hist_gradient_boosting) on Parquet data, or to predict with a model mloom saved, e.g. "この Parquet で品質を予測するモデルを最適化して", "hist_gradient_boosting で特徴量選択とハイパラ探索をして", "この model.pkl で新しいデータを予測して".
 ---
 
 # Model optimization
@@ -47,7 +47,7 @@ Test-Path -LiteralPath (Join-Path $clone 'pyproject.toml'), (Join-Path $clone 'c
 - `config/mloom.toml` of the user's repository holds `[columns] max_missing_rate` (threshold of column exclusion), `[preprocessing] use_unlabeled_rows` (whether rows without a target join the statistics of preprocessing), `[clip]` (clipping of outliers) and `[impute]` (imputation of missing values). Keys it does not set come from `config/mloom.local.toml` and then `config/mloom.toml` of `<clone>`.
   - Do not edit any of these files unless the user asks. When the user asks, change only the keys the user names, to the values the user gives; the keys and their choices are in `<clone>\config\mloom.toml`.
 - `config/unavailable-sensors.json` of the user's repository is read by default. Do not create or edit it unless the user asks.
-- Choose `--output` as `outputs/<target>-<model>-<cv>` unless the user names a directory. Tell the user that an existing `model.pkl` and `run.json` there are overwritten.
+- Choose `--output` as `outputs/<target>-<model>-<cv>` unless the user names a directory. Tell the user that an existing `model.pkl` there is overwritten.
 
 ## 3. Row filters (only when the user gives row conditions)
 
@@ -83,13 +83,19 @@ uv run --project "<clone>" mloom optimize <data.parquet> --target <column> --tas
 
 - The search can take minutes. Run it in the background if your environment supports that, and tell the user it is running.
 - Exit codes (the same for `mloom predict`):
-  - `0`: success. The last line of stdout is the path of `run.json` (`mloom predict`: of the predictions).
+  - `0`: success. The last line of stdout is the path of `model.pkl` (`mloom predict`: of the predictions).
   - `2`: invalid input. Show the `error:` line from stderr, and ask the user how to fix it. Do not work around it by changing the data.
   - `1`: unexpected error. Show the end of the traceback and stop.
 
-## 5. Explain run.json
+## 5. Explain the run record
 
-Read `run.json` and report, in the user's language:
+`model.pkl` holds the record of the run. Print it as JSON (the same exit codes as above):
+
+```powershell
+uv run --project "<clone>" mloom show <output>/model.pkl
+```
+
+Read that output and report, in the user's language:
 
 - The score: `cv_scores.mean` ± `cv_scores.std` of `metric` (`metric_direction` says whether smaller or larger is better), the CV method and the number of folds.
 - The selected columns (`selected_columns`), out of `candidate_columns`.
@@ -117,7 +123,7 @@ uv run --project "<clone>" mloom predict <model.pkl> <data.parquet> --output <pr
 - Confusion matrix, only when the user gives its settings. Never choose a threshold, the positive side, or the positive class yourself; if the user gave only some of them, ask for the rest.
   - Regression: all three of `--cm-actual-threshold` (of the target), `--cm-predicted-threshold` (of the prediction), and `--cm-positive` (`above`: larger than the threshold is positive; `below`: smaller. A value equal to the threshold is negative).
   - Classification: `--positive-class`, and `--cm-predicted-threshold` (of the probability of that class; default 0.5) only when the user gives it.
-- The input needs the candidate columns (`candidate_columns` of `run.json`) and the columns of `filters`. When it has the target column, it also needs `cv.time_column` and `cv.group_column` when they are set. mloom stops with exit code 2 otherwise.
+- The input needs the candidate columns (`candidate_columns` of the run record, from `mloom show`) and the columns of `filters`. When it has the target column, it also needs `cv.time_column` and `cv.group_column` when they are set. mloom stops with exit code 2 otherwise.
 
 ## 7. Explain the predictions
 

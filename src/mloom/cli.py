@@ -2,12 +2,13 @@
 
 It holds no processing of its own (see "CLI" in ``docs/spec.md``). Exit
 codes: 0 on success, 2 for invalid input (including invalid arguments), 1
-for any other error. The last line of stdout is the path of the saved file
-(``run.json`` of ``optimize``, the predictions of ``predict``); progress and
-errors go to stderr.
+for any other error. The last line of stdout of ``optimize`` and ``predict``
+is the path of the saved file (``model.pkl``, the predictions); ``show``
+prints the record of the run as JSON. Progress and errors go to stderr.
 """
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -24,6 +25,7 @@ from mloom.errors import InputError
 from mloom.evaluation import POSITIVE_SIDES
 from mloom.filters import load_filters
 from mloom.metrics import METRICS
+from mloom.model_file import read_run
 from mloom.models import MODELS
 from mloom.optimize import optimize_model
 from mloom.prediction import PASSED_FILTER, predict
@@ -45,13 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mloom", description=mloom.__doc__)
     parser.add_argument("--version", action="version", version=mloom.__version__)
     commands = parser.add_subparsers(dest="command", required=True)
-    optimize = commands.add_parser("optimize", help="select features, tune a model, and save model.pkl and run.json")
+    optimize = commands.add_parser("optimize", help="select features, tune a model, and save model.pkl")
     optimize.add_argument("data", type=Path, help="Parquet file")
     optimize.add_argument("--target", required=True, help="target column")
     optimize.add_argument("--task", required=True, choices=TASKS)
     optimize.add_argument("--model", required=True, choices=tuple(MODELS))
     optimize.add_argument("--cv", required=True, choices=CV_METHODS)
-    optimize.add_argument("--output", required=True, type=Path, help="directory for model.pkl and run.json")
+    optimize.add_argument("--output", required=True, type=Path, help="directory for model.pkl")
     optimize.add_argument("--n-splits", type=int, default=5)
     optimize.add_argument("--time-column", help="required with --cv timeseries")
     optimize.add_argument("--group-column", help="required with --cv group")
@@ -95,6 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     predict_parser.add_argument("--cm-positive", choices=POSITIVE_SIDES, help="side of the thresholds that is positive")
     predict_parser.add_argument("--positive-class", help="positive class of the confusion matrix (classification)")
+    show = commands.add_parser("show", help="print the record of the run in a model.pkl as JSON")
+    show.add_argument("model", type=Path, help="model.pkl saved by optimize")
     return parser
 
 
@@ -152,24 +156,24 @@ def main(argv: list[str] | None = None) -> int:
         Exit code.
     """
     args = build_parser().parse_args(argv)
-    run = _optimize if args.command == "optimize" else _predict
+    run = {"optimize": _optimize, "predict": _predict, "show": _show}[args.command]
     try:
-        saved = run(args)
+        output = run(args)
     except InputError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INPUT
     except Exception:  # noqa: BLE001 - any other failure is reported as exit code 1
         traceback.print_exc()
         return EXIT_ERROR
-    print(saved)
+    print(output)
     return EXIT_OK
 
 
 def _optimize(args: argparse.Namespace) -> Path:
     result = optimize_model(args.data, to_config(args))
-    run_path = result.save(args.output)
+    model_path = result.save(args.output)
     _print_summary(result)
-    return run_path
+    return model_path
 
 
 def _predict(args: argparse.Namespace) -> Path:
@@ -187,6 +191,10 @@ def _predict(args: argparse.Namespace) -> Path:
     predictions.write_parquet(args.output)
     print(f"{predictions.height} rows predicted; {predictions[PASSED_FILTER].sum()} passed the filters", file=sys.stderr)
     return args.output
+
+
+def _show(args: argparse.Namespace) -> str:
+    return json.dumps(read_run(args.model), ensure_ascii=False, indent=2)
 
 
 def _print_summary(result: Result) -> None:

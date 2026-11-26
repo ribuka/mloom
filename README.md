@@ -1,6 +1,6 @@
 # mloom
 
-Parquet のデータと、ユーザーが選んだモデルを渡すと、使えないセンサの除外、特徴量選択、ハイパーパラメータ探索、最終学習までを自動で行い、学習済みの Pipeline を `model.pkl` に、実行の記録を `run.json` に保存する Python ライブラリです。
+Parquet のデータと、ユーザーが選んだモデルを渡すと、使えないセンサの除外、特徴量選択、ハイパーパラメータ探索、最終学習までを自動で行い、学習済みの Pipeline と実行の記録を 1 つの `model.pkl` に保存する Python ライブラリです。
 
 - Python API が本体です。エージェントは同梱の Skill（[skills/model-optimization/SKILL.md](skills/model-optimization/SKILL.md)）から薄い CLI を通して使います。
 - 仕様と未決事項は [docs/spec.md](docs/spec.md) にあります。現在はたたき台（v0.1.0）です。
@@ -53,7 +53,13 @@ uv run examples/make_sample_data.py
 uv run mloom optimize data/sample.parquet --target quality --task regression --model hist_gradient_boosting --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors examples/unavailable-sensors.json --n-trials 20 --output outputs/quality-hgb
 ```
 
-- `outputs/quality-hgb/` に `model.pkl` と `run.json` ができます。
+- `outputs/quality-hgb/` に `model.pkl` ができます。標準出力の最後の行はそのパスです。
+- 実行の記録（採用した列、除外した列と理由、最良のパラメータ、CV のスコア、ライブラリの版など）は `model.pkl` の中にあり、`mloom show` で JSON に出せます。リダイレクトすれば JSON のファイルにもできます。
+
+```powershell
+uv run mloom show outputs/quality-hgb/model.pkl
+```
+
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
 - 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式を変えられます（下の「前処理」）。
 - `unavailable-sensors.json` と `mloom.toml` は、mloom を使う側のリポジトリの `config/` に置きます。
@@ -65,7 +71,7 @@ uv run mloom optimize data/sample.parquet --target quality --task regression --m
 1. `config/mloom.local.toml`: その PC だけの既定値。git 対象外です。mloom を clone から実行したときだけ読みます。
 2. [config/mloom.toml](config/mloom.toml): すべてのキーの既定値と説明。wheel にも同梱されます。
 - 目的変数が欠損している行は学習と評価から外します。ただし既定では、欠損率と、前処理の統計量（クリップの上下限、補完の値、標準化の平均と標準偏差）の計算には使います。
-- 目的変数が無限大（+inf・-inf）の行は外し、行数を `run.json` の `data.n_rows_with_infinite_target` に残します。説明変数の無限大は、学習でも予測でも欠損として扱います（列ごとの行数は `data.infinite_by_column`）。
+- 目的変数が無限大（+inf・-inf）の行は外し、行数を記録の `data.n_rows_with_infinite_target` に残します。説明変数の無限大は、学習でも予測でも欠損として扱います（列ごとの行数は `data.infinite_by_column`）。
 - 分類は `--target grade --task classification --exclude-columns quality`、Group の CV は `--cv group --group-column lot` です。
 
 ## 入力
@@ -89,7 +95,7 @@ uv run mloom optimize data/sample.parquet --target quality --task regression --m
 | `[clip]` | 既定 `none`（切らない） | `quantile`、`iqr`、`mad`、`sigma`。上下限は欠損と無限大を除いて計算し、ばらつきが 0 の列は切りません |
 | `[impute]` | 既定 `auto` | `none`、`median`、`mean`、`most_frequent`、`constant`、`knn`、`iterative`。`auto` は `ridge`・`pls` では `median`、`hist_gradient_boosting`・`random_forest` では `none`（欠損のまま学習）です。`none` を `ridge`・`pls` で選ぶと終了コード 2 で止まります |
 
-- 使った値は `run.json` の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。
+- 使った値は記録の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。
 
 ## Python API
 
@@ -109,7 +115,8 @@ result = mloom.optimize_model(
     ),
 )
 print(result.cv_scores, result.selected_columns)
-result.save("outputs/quality-ridge")
+result.save("outputs/quality-ridge")  # outputs/quality-ridge/model.pkl を返す
+run = mloom.read_run("outputs/quality-ridge/model.pkl")  # 記録の辞書（mloom show と同じ内容）
 ```
 
 ## 行のフィルタ
@@ -125,7 +132,7 @@ result.save("outputs/quality-ridge")
 
 - `filters` は学習と予測の両方に効きます。`train_filters` は学習だけに効き、予測では行を絞りません。
 - 条件どうしは AND です。`op` は `eq`・`ne`・`lt`・`le`・`gt`・`ge`・`is_in`・`is_between`・`is_null`・`is_not_null`・`str_contains_all`・`str_contains_any` です。意味とエラーになる場合は [docs/spec.md](docs/spec.md) の「行のフィルタ」を見てください。
-- 外した行数は `run.json` の `data`（`n_rows_filtered_out`・`n_rows_train_filtered_out`）に残ります。
+- 外した行数は記録の `data`（`n_rows_filtered_out`・`n_rows_train_filtered_out`）に残ります。
 
 ## 予測
 
@@ -140,7 +147,7 @@ predictions = mloom.predict("outputs/quality-ridge/model.pkl", "data/new.parquet
 - 入力と同じ行数・同じ順で、`--keep-columns` の列、`prediction`、`passed_filter`、`used_for_training`、分類では `proba_<クラス>` を返します。
 - `filters` の条件を満たさない行は予測せず、`prediction` を NaN（分類では null）にします。
 - `used_for_training` は、最終モデルの学習に使った行だけが true です。入力に目的変数の列か `train_filters` の列が無いときは null です。
-- 入力には、候補列（`run.json` の `candidate_columns`）と、`filters` に使う列が要ります。目的変数の列があるときは、`time_column`・`group_column` の列も要ります（学習に使った行の照合と、スコアのため）。無ければ終了コード 2 で止まります。列の順は問わず、余分な列は無視されます。
+- 入力には、候補列（記録の `candidate_columns`）と、`filters` に使う列が要ります。目的変数の列があるときは、`time_column`・`group_column` の列も要ります（学習に使った行の照合と、スコアのため）。無ければ終了コード 2 で止まります。列の順は問わず、余分な列は無視されます。
 
 ### スコア・混同行列・SHAP の寄与
 
@@ -170,7 +177,7 @@ predictions = mloom.predict(
 | `rmse`、`r2` | スコアの対象の行全体での RMSE と R²。全行に同じ値。対象が 0 行なら null（`r2` は 2 行未満で null） | 回帰のとき |
 | `cm` | スコアの対象の行が、混同行列の `tp`・`fp`・`fn`・`tn` のどれか。ほかの行は null | 閾値（分類では `--positive-class`）を与えたとき |
 | `accuracy`、`precision`、`recall` | スコアの対象の行の `cm` の数から計算した値。全行に同じ値。分母が 0 なら null | 同上 |
-| `shap_base`、`shap_<列名>` | 基準値と、採用した列（`run.json` の `selected_columns`）ごとの SHAP の寄与。多値分類では、クラスごとに `shap_base_<クラス>`、`shap_<クラス>_<列名>`。フィルタの条件を満たさない行は NaN | `--shap` を付けたとき |
+| `shap_base`、`shap_<列名>` | 基準値と、採用した列（記録の `selected_columns`）ごとの SHAP の寄与。多値分類では、クラスごとに `shap_base_<クラス>`、`shap_<クラス>_<列名>`。フィルタの条件を満たさない行は NaN | `--shap` を付けたとき |
 
 - スコアの対象の行は、時刻（`time_column`）が、最終モデルの学習に使った行の最も新しい時刻より後で、目的変数が欠損でも無限大でもなく、予測した（`passed_filter` が true の）行です。学習期間の中の行で測ると、成績が良く見えすぎるためです。
 - `time_column` を指定せずに学習したモデル（`kfold`・`group` の CV）と、入力に目的変数の列が無いときは、スコアと混同行列の列はすべて null です。
@@ -181,7 +188,20 @@ predictions = mloom.predict(
 
 ### mloom を使わずに予測する
 
-`model.pkl` は、mloom が無い環境でも読めます（学習時と同じ版の scikit-learn・numpy・scipy は要ります。版は `run.json` の `versions` にあります）。中身は `pipeline`、`filters`、`train_filters`、`training_rows`、`shap_background` の辞書です。
+`model.pkl` は、mloom が無い環境でも読めます。1 つのファイルに pickle が 2 つ続けて入っていて、`pickle.load` を 2 回呼んで読みます。
+
+```python
+import pickle
+
+with open("outputs/quality-hgb/model.pkl", "rb") as file:
+    run = pickle.load(file)     # 記録（scikit-learn が無くても読める）
+    bundle = pickle.load(file)  # モデル（学習時と同じ版の scikit-learn などが要る）
+```
+
+- 1 つ目は実行の記録（`mloom show` の出力と同じ辞書）で、Python の基本の型だけでできているので、scikit-learn も numpy も無くても読めます。
+- 2 つ目はモデルで、`pipeline`、`filters`、`train_filters`、`training_rows`、`shap_background` の辞書です。読むには、学習時と同じ版の scikit-learn・numpy・scipy が要ります（版は記録の `versions` にあります）。
+
+予測の例:
 
 ```python
 import pickle
@@ -190,7 +210,8 @@ import numpy as np
 import polars as pl
 
 with open("outputs/quality-ridge/model.pkl", "rb") as file:
-    bundle = pickle.load(file)
+    run = pickle.load(file)  # 記録
+    bundle = pickle.load(file)  # モデル
 data = pl.read_parquet("data/new.parquet")
 # filters を AND で評価する（eq・lt などの比較だけの例）。欠損の行は条件を満たさない
 conditions = [getattr(pl.col(f["column"]), f["op"])(f["value"]).fill_null(False) for f in bundle["filters"]]
@@ -203,7 +224,7 @@ if passed.any():  # 0 行では predict を呼ばない
 - `pipeline` の `predict` に渡す表には、候補列があれば足ります（列の順は問わず、余分な列は無視されます）。`filters` を評価するには、その列も要ります。
 - 例は、比較の演算子（`eq`・`lt` など）の `filters` だけを扱います。ほかの演算子、日時の値（ISO 8601 の文字列を列の型に変換して比べる）、浮動小数の列の NaN（`mloom predict` では欠損として条件を満たさない）は、[docs/spec.md](docs/spec.md) の「行のフィルタ」に合わせて書き足してください。
 - 分類では、`prediction` を `np.full(data.height, None, dtype=object)` で用意します。
-- `model.pkl` は pickle です。pickle は読むときに任意のコードを実行できるため、信頼できないファイルは読まないでください。
+- `model.pkl` は pickle です。pickle は読むときに任意のコードを実行できるため、信頼できないファイルは読まないでください（`mloom show`・`mloom predict`・`mloom.read_run` で読むときも同じです）。
 
 ## 開発
 

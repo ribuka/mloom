@@ -56,7 +56,7 @@ def optimize_model(data: Data, config: Config) -> Result:
     -------
     Result
         The fitted pipeline and the record of the run; ``Result.save`` writes
-        ``model.pkl`` and ``run.json``.
+        both as ``model.pkl``.
 
     Raises
     ------

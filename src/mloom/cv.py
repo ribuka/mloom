@@ -43,7 +43,7 @@ class CVPlan:
     unlabeled_folds: list[np.ndarray]
 
     def describe(self, config: Config) -> dict[str, Any]:
-        """Describe the split for ``run.json``.
+        """Describe the split for the record of the run.
 
         Parameters
         ----------

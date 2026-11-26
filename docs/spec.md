@@ -8,6 +8,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 - たたき台の実装の後に、未決 8・10・12・13・16・18 を決め、行のフィルタ、クリップ、補完の方式の選択、`hist_gradient_boosting` を足すことを決めた（2026-11-26 ユーザー判断）。まだ実装していない箇所には「（未実装）」と書き、実装は後続の PR で行う。
 - そのうち、行のフィルタ、mloom に依存しない `model.pkl`、`mloom predict` の基本（スコア・混同行列・SHAP を除く）を実装した（2026-11-26、Issue #4）。
 - `mloom predict` のスコア・混同行列・SHAP の寄与を実装した（2026-11-26、Issue #6）。
+- 出力を `model.pkl` 1 つにまとめ、1 段目に実行の記録を入れた。以前は記録を別の `run.json` に保存していた（2026-11-26、Issue #18）。
 
 ## 要件
 
@@ -27,14 +28,14 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | ライブラリ | Optuna ＋ scikit-learn | ユーザーがモデルを指定する前提なので、特徴量選択・CV・HPO を mloom 側でつなぐ。AutoML ライブラリにモデル選択まで任せる必要はない |
 | モデル | 実行ごとにユーザーが選ぶ（例: `ridge`、`pls`、`hist_gradient_boosting`、`random_forest`）。1 つのモデルに固定しない | 対象データごとに適したモデルが違うため |
 | 勾配ブースティング | LightGBM をやめ、scikit-learn の `HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`（`hist_gradient_boosting`）に置き換える（2026-11-26 ユーザー判断。2026-11-26 に実装） | `model.pkl` を読む環境に lightgbm を要らなくするため。同じヒストグラム型の勾配ブースティングで、欠損をそのまま扱える。結果は LightGBM と一致しない（サンプルデータの時系列 5 分割で、既定値の RMSE は LightGBM 3.450、HistGradientBoosting 3.487）。行のサブサンプリング（LightGBM の `subsample`）は無い |
-| 出力 | 学習済みの Pipeline 全体と行のフィルタの定義を `model.pkl` に、実行の記録を `run.json` に保存する | モデル本体だけを保存すると、予測する側で列の選択や欠損補完を再現する必要がある。Pipeline ごと保存すれば同じ処理を通せる |
+| 出力 | 学習済みの Pipeline 全体と行のフィルタの定義（モデル）と、実行の記録を、1 つの `model.pkl` に保存する。記録は pickle の 1 段目に Python の基本の型だけで、モデルは 2 段目に入れる（2026-11-26 ユーザー判断。Issue #18。以前は記録を別の `run.json` に保存していた） | モデル本体だけを保存すると、予測する側で列の選択や欠損補完を再現する必要がある。Pipeline ごと保存すれば同じ処理を通せる。1 つのファイルにまとめたのは、`model.pkl` と `run.json` には相手を指す情報が無く、片方だけのコピーや名前の変更、別の `model.pkl` での上書き、保存の途中の失敗で、どれが組なのか分からなくなるため。記録を 1 段目に基本の型だけで置くと、scikit-learn の版が変わっても記録は必ず読める。記録をテキストのまま Git で差分を見る使い方はできなくなり、本番に置く `model.pkl` に学習時の記録（ローカルのパスなど）も入るが、どちらもユーザーが受け入れた。zip にまとめる案は採らなかった |
 | `model.pkl` の依存 | `model.pkl` は mloom が無い環境でも読めるようにする。Pipeline には scikit-learn・numpy などの部品と関数だけを入れ、mloom のクラスや関数を入れない（2026-11-26 ユーザー判断。未決 16） | 予測する環境に mloom を入れなくて済むようにするため |
 | 予測の入口 | `pickle.load` に加えて、`mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 ユーザー判断。未決 10。スコア・混同行列・SHAP は 2026-11-26 に Issue #6 で実装） | フィルタの適用と、フィルタの外の行を NaN にする処理を 1 か所にまとめ、Skill から予測まで実行できるようにするため |
-| 行のフィルタ | 列と値の条件で、学習と予測に使う行を絞れる。条件は AND だけで、定義を `model.pkl` と `run.json` に残す（2026-11-26 ユーザー判断。「行のフィルタ」） | 運転条件などで、モデルを使う範囲を決めるため |
+| 行のフィルタ | 列と値の条件で、学習と予測に使う行を絞れる。条件は AND だけで、定義を `model.pkl` の記録とモデルの両方に残す（2026-11-26 ユーザー判断。「行のフィルタ」） | 運転条件などで、モデルを使う範囲を決めるため |
 | 前処理の方式 | 説明変数のクリップと補完の方式を、設定ファイルで選べる（2026-11-26 ユーザー判断。2026-11-26 に実装。「前処理」） | データによって適した前処理が違うため |
 | 本体の形 | 処理の本体は決定論的な Python コードにする。Skill は「ユーザーの指定を CLI の引数に変換し、結果を説明する」だけにする | どの列を除外するか、どう評価するか、何を保存するかを、実行のたびに変わらないようにするため |
-| 入口 | **Python API が本体**。Skill 向けに薄い CLI を用意する。CLI は Python API を呼ぶだけにする | 人は Notebook や既存コードから API で使い、エージェントは設定を渡して 1 回実行し、終了コードと `run.json` で結果を確かめる。センサ除外・特徴量選択・HPO の実装は 1 か所に置く |
-| API の形 | `optimize_model(data, config)` が学習済み Pipeline と評価結果を返し、`result.save(output_dir)` で `model.pkl` と `run.json` を保存する | 同上 |
+| 入口 | **Python API が本体**。Skill 向けに薄い CLI を用意する。CLI は Python API を呼ぶだけにする | 人は Notebook や既存コードから API で使い、エージェントは設定を渡して 1 回実行し、終了コードと記録（`mloom show`）で結果を確かめる。センサ除外・特徴量選択・HPO の実装は 1 か所に置く |
+| API の形 | `optimize_model(data, config)` が学習済み Pipeline と評価結果を返し、`result.save(output_dir)` で記録とモデルを `model.pkl` に保存する | 同上 |
 | データの渡し方 | API には Parquet のパス、または Polars の DataFrame を渡せる。CLI には Parquet のパスを渡す | 同上 |
 | 無限大 | 説明変数の +inf・-inf は、学習時も予測時も欠損とみなす。目的変数に +inf・-inf がある行は、学習から外す（2026-11-26 ユーザー判断で、「説明変数に無限大がある行は行ごと外す」から変更。2026-11-26 に実装。未決 18） | 予測時は行ごとに値を返すので行を外せず、学習時だけ行を外すと、学習と予測で扱いが食い違うため。プロセスデータの無限大は、ゼロ除算やヒストリアンのエラー値など「値が正しく取れていない」ことが多く、欠損として扱うのが一般的。無限大が多い列は欠損率のしきい値で除外される |
 | 欠損率のしきい値 | 説明変数を除外する欠損率のしきい値を、利用側リポジトリの `config/mloom.toml` で変えられる（2026-11-26 ユーザー判断。「設定ファイル」） | データによって適したしきい値が違うため |
@@ -56,18 +57,18 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 エージェント ─ SKILL.md ─ CLI（mloom optimize）─▶ Python API（optimize_model）
                                              │
                                              ▼
-                                   output_dir/model.pkl, run.json
+                          output_dir/model.pkl（1 段目: 記録、2 段目: モデル）
                                              │
                       ┌──────────────────────┴───────────────────────┐
                       ▼                                              ▼
-       mloom predict / mloom.predict                   pickle.load（mloom なしで読める）
+  mloom predict / mloom.predict（モデル）     mloom show / mloom.read_run（記録）、pickle.load（mloom なしで読める）
 ```
 
 | 使う場面 | 入口 | 使い方 |
 | --- | --- | --- |
 | Notebook や既存の Python コード | Python API | Parquet のパスか手元の Polars DataFrame を渡し、学習済み Pipeline とスコアをその場で確かめる |
-| Skill やシェルから実行するエージェント | CLI | 引数を渡して 1 回実行し、終了コードと `run.json` で結果を確かめる。Python スクリプトを毎回生成しなくてよい |
-| mloom が無い環境での予測 | `pickle.load` | `model.pkl` の Pipeline とフィルタの定義を取り出し、予測する側でフィルタを適用してから `predict` する（「`model.pkl`」） |
+| Skill やシェルから実行するエージェント | CLI | 引数を渡して 1 回実行し、終了コードと `mloom show` で出す記録で結果を確かめる。Python スクリプトを毎回生成しなくてよい |
+| mloom が無い環境での予測 | `pickle.load` | `model.pkl` を 2 回 `pickle.load` し、2 段目のモデルから Pipeline とフィルタの定義を取り出し、予測する側でフィルタを適用してから `predict` する（「`model.pkl`」） |
 
 ## 入力
 
@@ -75,7 +76,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 - 1 行が 1 サンプル、列がセンサ値などの説明変数と目的変数の、横持ちの表（案）。
 - 形式: Parquet ファイル（API と CLI）、`polars.DataFrame`（API のみ）。
-- 説明変数の候補は数値の列だけ（案）。文字列やカテゴリの列は除外して、`run.json` に理由を残す。
+- 説明変数の候補は数値の列だけ（案）。文字列やカテゴリの列は除外して、記録に理由を残す。
 
 ### 設定（案）
 
@@ -115,10 +116,10 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 | 状況 | 扱い（案） |
 | --- | --- |
-| ファイルが無い | 除外なしで続ける。`run.json` に「ファイルなし」と残す |
+| ファイルが無い | 除外なしで続ける。記録に「ファイルなし」と残す |
 | JSON として読めない、形式が違う | エラーで止める（終了コード 2） |
-| 列名と一致する | その列を説明変数から外し、`run.json` に理由 `unavailable_sensor` で残す |
-| 定義にあるがデータに無い | 続ける。`run.json` に警告として残す |
+| 列名と一致する | その列を説明変数から外し、記録に理由 `unavailable_sensor` で残す |
+| 定義にあるがデータに無い | 続ける。記録に警告として残す |
 | 目的変数が定義にある | エラーで止める（終了コード 2） |
 
 - 照合は列名の完全一致（案）。1 つのセンサから複数の列がある場合（`TI-101_mean` など）の照合は「未決事項」。
@@ -132,7 +133,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 読む順（上ほど優先。キーごとに、最初に見つかった値を使う）:
 
-| 順 | ファイル | 役割（`run.json` の `settings.files[].role`） | 読む条件 |
+| 順 | ファイル | 役割（記録の `settings.files[].role`） | 読む条件 |
 | --- | --- | --- | --- |
 | 1 | 利用側の `config/mloom.toml`（実行時のカレントディレクトリから。`--settings` で別のファイルも指定できる） | `project` | 常に |
 | 2 | mloom リポジトリの `config/mloom.local.toml`（git 対象外） | `local_defaults` | mloom を clone から実行したとき |
@@ -182,11 +183,11 @@ n_neighbors = 5
 
 | 状況 | 扱い |
 | --- | --- |
-| 1 や 2 のファイルが無い | 無視して次を探す。`run.json` の `settings.files[].found` が `false` になる |
+| 1 や 2 のファイルが無い | 無視して次を探す。記録の `settings.files[].found` が `false` になる |
 | キーが無い | 次のファイルを探す |
 | どのファイルでも、TOML として読めない、知らない表やキーがある、値が範囲外 | エラーで止める（終了コード 2）。打ち間違いで黙って既定値になるのを防ぐため |
 
-- 使った値と、各キーを読んだファイルを `run.json` の `settings` に残す（`sources`）。値も `sources` も、TOML と同じく表ごとに入れ子にする（2026-11-26 実装で決定。`settings.columns.max_missing_rate`、`settings.sources.clip.method` など）。`[clip] method` と `[impute] method` のように、表が違えば同じ名前のキーがあるため。
+- 使った値と、各キーを読んだファイルを記録の `settings` に残す（`sources`）。値も `sources` も、TOML と同じく表ごとに入れ子にする（2026-11-26 実装で決定。`settings.columns.max_missing_rate`、`settings.sources.clip.method` など）。`[clip] method` と `[impute] method` のように、表が違えば同じ名前のキーがあるため。
 
 ## 処理の流れ
 
@@ -196,7 +197,7 @@ n_neighbors = 5
 4. CV の分割を決める（下の「CV」）。
 5. Optuna で、特徴量選択とモデルのハイパーパラメータを同時に探索する（下の「特徴量選択」「HPO」）。各試行の評価は CV の平均スコア。
 6. 最良の設定で、学習に使う行のすべてを使って Pipeline を学習し直す。
-7. `model.pkl` と `run.json` を保存する。
+7. 記録とモデルを `model.pkl` に保存する。
 
 評価側のデータの情報が学習に漏れないように、次のように fit する。
 
@@ -209,16 +210,16 @@ n_neighbors = 5
 決定事項（2026-11-26 ユーザー判断。2026-11-26 に実装、`mloom.filters`）:
 
 - 列と値の条件（`filters`）を満たす行だけを、学習と予測に使う。条件どうしは AND だけ（OR は書けない）。
-- 定義は `model.pkl` と `run.json` の両方に残す。予測時に、条件を満たさない行の予測値は NaN にする（「`model.pkl`」「予測」）。
-- 定義は polars の式（`pl.Expr`）ではなく、列名・演算子・値を並べたデータにする。読むのに polars も要らず、`run.json` にもそのまま書けるため。`pl.Expr` の pickle は polars の版をまたいで形式が保証されないと理解している（未確認）。
+- 定義は `model.pkl` の記録とモデルの両方に残す。予測時に、条件を満たさない行の予測値は NaN にする（「`model.pkl`」「予測」）。
+- 定義は polars の式（`pl.Expr`）ではなく、列名・演算子・値を並べたデータにする。読むのに polars も要らず、記録にもそのまま書けるため。`pl.Expr` の pickle は polars の版をまたいで形式が保証されないと理解している（未確認）。
 
 学習だけに効くフィルタ（`train_filters`。2026-11-26 ユーザー判断）:
 
 - `filters` とは別のリストに書く。形と演算子は `filters` と同じ。例: 1 年分のデータのうち 9 月までで学習し、1 年分すべてを予測する。
 - 学習時は、`filters` と `train_filters` の両方を満たす行だけを使う。`train_filters` で外れた行は、補完・標準化の統計量にも使わない。学習期間の外の説明変数の分布を、学習に入れないため。
 - 予測時は `train_filters` を使わない。外れた行も予測し、`passed_filter` は `filters` だけで決まる。学習に使っていないことは、`used_for_training` が false になることでわかる。
-- `run.json` と `model.pkl` の両方に残す。`model.pkl` の `train_filters` は、予測では行を絞らず、`used_for_training` の判定にだけ使う（「予測」）。
-- 学習期間の外の行でのスコアは、`mloom optimize` では計算しない（2026-11-26 ユーザー判断）。HPO と特徴量選択は学習期間の中の CV だけで決める。学習期間の外のスコアを `run.json` に出すと、それを見ながら設定を変えて実行を繰り返し、学習期間の外のデータでチューニングしたのと同じことになりやすいため。学習期間の外での評価は、`mloom predict` の役目にする（「予測」）。
+- `model.pkl` の記録とモデルの両方に残す。モデルの `train_filters` は、予測では行を絞らず、`used_for_training` の判定にだけ使う（「予測」）。
+- 学習期間の外の行でのスコアは、`mloom optimize` では計算しない（2026-11-26 ユーザー判断）。HPO と特徴量選択は学習期間の中の CV だけで決める。学習期間の外のスコアを記録に出すと、それを見ながら設定を変えて実行を繰り返し、学習期間の外のデータでチューニングしたのと同じことになりやすいため。学習期間の外での評価は、`mloom predict` の役目にする（「予測」）。
 
 形式。CLI の `--filters` に渡す JSON ファイルの中身（どちらのキーも省略できる。ほかのキーはエラー）:
 
@@ -257,7 +258,7 @@ n_neighbors = 5
 
 実装で決めたこと（2026-11-26、Issue #4）:
 
-- 学習時は、「行の除外」の前に、まず `filters`、次に `train_filters` を適用する。目的変数が欠損した行（統計量に使う行）にも適用する。外した行数を `run.json` の `data` に残す（`filters` で外した行は `n_rows_filtered_out`、さらに `train_filters` で外した行は `n_rows_train_filtered_out`）。`n_rows` は入力の行数のまま。`n_rows_without_target` などの「行の除外」の行数は、両方のフィルタの後に残った行で数える。フィルタで外した行を、目的変数の欠損などで重ねて数えないため。
+- 学習時は、「行の除外」の前に、まず `filters`、次に `train_filters` を適用する。目的変数が欠損した行（統計量に使う行）にも適用する。外した行数を記録の `data` に残す（`filters` で外した行は `n_rows_filtered_out`、さらに `train_filters` で外した行は `n_rows_train_filtered_out`）。`n_rows` は入力の行数のまま。`n_rows_without_target` などの「行の除外」の行数は、両方のフィルタの後に残った行で数える。フィルタで外した行を、目的変数の欠損などで重ねて数えないため。
 - 列がデータに無い、`op` を知らない、知らないキーがある、`value` の形が `op` に合わない、列の型と値の型が合わないときは、学習を始める前に `InputError`（終了コード 2）で止める。データが要らない検査（キー、`op`、`value` の形）は `Config` を作った時点で行う。
   - `value` の形: 比較の演算子はスカラー（数値・文字列・真偽値。null は不可。欠損は `is_null` で書く）、`is_in` は空でない配列、`is_between` は 2 要素の配列、`str_contains_*` は空でない文字列の配列。
   - 列の型と値の型: 数値の列（整数・浮動小数・Decimal）には数値（真偽値は不可）、真偽値の列には真偽値、文字列の列（String・Categorical・Enum）には文字列、日時・日付の列には ISO 8601 の文字列。ほかの型の列（Duration、Time、List など）には `is_null`・`is_not_null` だけを使える。黙って行が消えるのを防ぐため。
@@ -267,13 +268,13 @@ n_neighbors = 5
 - `filters` か `train_filters` を適用した後に 1 行も残らなければエラーで止める（終了コード 2）。
 - `time_column`・`group_column` の欠損の検査は、フィルタの後の行で行う。フィルタで外した行は使わないので、その行の欠損では止めない（`is_not_null` のフィルタで、欠損した行を外せる）。
 - フィルタに使う列を、それだけの理由では説明変数から外さない。外すかどうかは、ほかの列と同じく「列の除外」で決まる。外したいときは `exclude_columns` で指定する。
-- `run.json` と `model.pkl` には、渡した条件をそのまま残す（`run.json` の一番上の `filters`・`train_filters`）。
+- 記録とモデルには、渡した条件をそのまま残す（記録の一番上の `filters`・`train_filters`）。
 
 ### 行の除外
 
-「行のフィルタ」を適用した後の行を、次の順に分け、外し、それぞれの行数を `run.json` の `data` に残す。
+「行のフィルタ」を適用した後の行を、次の順に分け、外し、それぞれの行数を記録の `data` に残す。
 
-| 順 | 扱い | `run.json` |
+| 順 | 扱い | 記録 |
 | --- | --- | --- |
 | 1 | 目的変数が欠損（null、NaN）の行を、学習と評価から外す。`use_unlabeled_rows` が true なら、統計量用の「目的変数が欠損した行」として残し、false なら捨てる | `n_rows_without_target` |
 | 2 | 学習用の行のうち、目的変数が +inf・-inf の行を外す（2026-11-26 ユーザー判断。未決 18） | `n_rows_with_infinite_target`。列ごとの無限大の行数は `infinite_by_column` |
@@ -291,7 +292,7 @@ n_neighbors = 5
 
 ### 列の除外
 
-特徴量選択の前に、目的変数を使わずに決められる列を外す。外した列は理由とともに `run.json` の `excluded_columns` に残す。
+特徴量選択の前に、目的変数を使わずに決められる列を外す。外した列は理由とともに記録の `excluded_columns` に残す。
 
 | 理由 | 対象 |
 | --- | --- |
@@ -327,7 +328,7 @@ n_neighbors = 5
 - 必要な列が無い、またはデータに無いときは、学習を始める前にエラーで止める（終了コード 2）。
 - 分割に使うのは目的変数がある行だけ。目的変数が欠損した行は評価側に入らない。
 
-分割ごとに、補完・標準化の統計量に加える「目的変数が欠損した行」（2026-11-26 ユーザー判断。`run.json` の `cv.folds[].n_unlabeled`）:
+分割ごとに、補完・標準化の統計量に加える「目的変数が欠損した行」（2026-11-26 ユーザー判断。記録の `cv.folds[].n_unlabeled`）:
 
 | `cv` | 加える行 | 理由 |
 | --- | --- | --- |
@@ -369,7 +370,7 @@ n_neighbors = 5
   - `quantile` で 2 つの分位点が同じ値になる列も、同じ理由でクリップしない（2026-11-26 実装で決定）。
   - 統計量用の行に有限の値が 1 つも無い列（CV の分割の学習側でだけすべて欠損の列など）は、上下限が求まらないので、同じくクリップしない（2026-11-26 実装で決定）。
   - 「1 点に潰れる」は、下限と上限が浮動小数の丸めの範囲（相対 1e-12）で等しいことで判定する。σ は、値がすべて同じでも丸めで 0 にならないことがあるため。
-- `run.json` の `preprocessing.clip` に、最終モデルの値で次の 3 つを残す。CV の分割ごとの値は書かない（`run.json` が大きくなりすぎるため）。
+- 記録の `preprocessing.clip` に、最終モデルの値で次の 3 つを残す。CV の分割ごとの値は書かない（記録が大きくなりすぎるため）。
   - `method`、`bounds`（クリップした列ごとの `[下限, 上限]`）、`unclipped_columns`（上の理由でクリップしなかった列）。`method` が `none` なら `bounds` と `unclipped_columns` は空。
 
 ```json
@@ -406,7 +407,7 @@ n_neighbors = 5
 
 - 各列を目的変数との関係でランク付けし（回帰は `f_regression`、分類は `f_classif`）、上位 `k` 列を使う。
 - `k` は HPO で探索するハイパーパラメータの 1 つにする（1 〜 候補列数、対数スケール）。
-- 最終学習で選ばれた列を「採用した列」として `run.json` の `selected_columns` に残す（候補列の順）。`best_params.k` と数が一致する。
+- 最終学習で選ばれた列を「採用した列」として記録の `selected_columns` に残す（候補列の順）。`best_params.k` と数が一致する。
 - ランク付けの方法（`mutual_info_regression`、モデルの重要度、相関の高い列の間引きなど）は「未決事項」。
 
 ランク付けを Pipeline の外で行う（2026-11-26 決定。2026-11-26 に実装、`mloom.selection`）:
@@ -423,7 +424,7 @@ n_neighbors = 5
 
 - Optuna の `TPESampler(seed=seed)`、試行数 `n_trials`、打ち切り時間 `timeout`。
 - 目的関数は CV の平均スコア（指標の本来の値。RMSE なら正の値）。`rmse`、`mae`、`log_loss` は最小化、`r2`、`accuracy`、`f1_macro`、`roc_auc` は最大化。
-- CV のどれかの分割で学習や評価に失敗した試行は、警告を標準エラーに出し、失敗として記録して比べない（`run.json` の `hpo.n_trials_failed`）。すべての試行が失敗したら `OptimizationError`（終了コード 1）。
+- CV のどれかの分割で学習や評価に失敗した試行は、警告を標準エラーに出し、失敗として記録して比べない（記録の `hpo.n_trials_failed`）。すべての試行が失敗したら `OptimizationError`（終了コード 1）。
 - 進捗は Optuna のログとして標準エラーに出る。
 - 探索空間はモデルごとに mloom 側で固定する（下の「モデル」）。Skill やユーザーには探索空間を書かせない。
 
@@ -445,7 +446,7 @@ n_neighbors = 5
 
 - Pipeline の構成: 入力列の選択 → 前処理（無限大を NaN に → クリップ → 補完 →（標準化）。fit 済みで固定）→ 採用した列の選択 → 推定器。前処理の fit に使う行は「処理の流れ」、各段は「前処理」「特徴量選択」。
 - 分類の `ridge` に `RidgeClassifier` ではなく `LogisticRegression` を当てるのは、`log_loss` と `roc_auc` に要る確率（`predict_proba`）を出せるため（案）。
-- たたき台の実装にあった `lightgbm`（追加の依存 `mloom[lightgbm]`）は、`hist_gradient_boosting` に置き換えてなくした（2026-11-26 に実装）。`pyproject.toml` の追加の依存と dev の依存、`run.json` の `versions.lightgbm` も消した。
+- たたき台の実装にあった `lightgbm`（追加の依存 `mloom[lightgbm]`）は、`hist_gradient_boosting` に置き換えてなくした（2026-11-26 に実装）。`pyproject.toml` の追加の依存と dev の依存、記録の `versions.lightgbm` も消した。
 - `hist_gradient_boosting` の `early_stopping` は `False` に固定する（2026-11-26 ユーザー判断。2026-11-26 に実装）。既定の `"auto"` は、1 万行を超えると学習データの 10% を内部の検証に取ってしまい、CV と最終学習で使う行が変わるため。
 - `task` に対応しないモデルを指定したら、学習を始める前にエラーで止める（終了コード 2）。
 
@@ -455,33 +456,51 @@ n_neighbors = 5
 
 | ファイル | 内容 |
 | --- | --- |
-| `model.pkl` | 学習済みの Pipeline 全体（列の選択・前処理・特徴量選択・モデル）、行のフィルタの定義、学習に使った行の照合用のハッシュ。予測時も同じ処理を通す |
-| `run.json` | 採用した列、除外した列と理由、最良のパラメータ、CV の分割、スコア、seed、ライブラリの版など |
+| `model.pkl` | 1 段目は実行の記録（「記録」。採用した列、除外した列と理由、最良のパラメータ、CV の分割、スコア、seed、ライブラリの版など）。2 段目はモデル（学習済みの Pipeline 全体（列の選択・前処理・特徴量選択・モデル）、行のフィルタの定義、学習に使った行の照合用のハッシュ）。予測時も同じ処理を通す |
 
 ### `model.pkl`
 
 - 標準ライブラリの `pickle` で保存する。
-- pickle は保存したときと同じ版の scikit-learn などで読む前提。版は `run.json` に残す。
+- 1 つのファイルに、`pickle.dump` を 2 回続けて書く（2026-11-26 ユーザー判断。Issue #18。「決定事項」の「出力」）。
+  1. **記録**（「記録」）: `Result.to_dict()` を `json.loads(json.dumps(...))` に通し、`dict`・`list`・`str`・`int`・`float`・`bool`・`None` だけにしたもの。読むのに scikit-learn も numpy も要らない（2026-11-26 に、`sys.modules` の `mloom`・`sklearn`・`numpy`・`polars` を `None` にした Python で読めることを `tests/test_model_file.py` で確かめた）。
+  2. **モデル**: 下の辞書（`Result.model_bundle()`）。
+- 書き出しは、同じディレクトリの `model.pkl.tmp` に 2 段を書き、`os.replace` で `model.pkl` に置き換える。保存の途中で失敗しても、前の `model.pkl` は変わらず、一時ファイルも残さない。出力のディレクトリには `model.pkl` だけを書く。
+- `mloom.read_run(path)` は 1 段目だけを読む（2 段目が無くても読める）。`mloom.prediction.load_model` は 1 段目を読み飛ばし、2 段目を返す。どちらも `mloom.model_file` が読み、このモジュールは scikit-learn と numpy を import しない（2026-11-26 実装で決定。`mloom` のパッケージの import では読み込まれる）。
+- 次のときは `InputError`（終了コード 2）で止める（2026-11-26、Issue #18）:
+  - ファイルが無い。
+  - 1 段目が pickle として読めない（途中で切れている、知らないプロトコルなど。`pickle.load` の `EOFError`・`UnpicklingError`・`ValueError`）、`dict` でない、または `mloom_version` のキーが無い。記録の入っていない以前の（1 段だけの）`model.pkl` もここに当たり、メッセージで `mloom optimize` で作り直すよう案内する。古い形を読み替える処理は作らない（`AGENTS.md`）。
+  - 2 段目が無いか読めない、または下の 5 つのキーを持つ辞書でない（`load_model` と `mloom predict` のとき）。
+- mloom を使わずに読むとき（README に書いた）:
+
+  ```python
+  import pickle
+
+  with open("outputs/quality-hgb/model.pkl", "rb") as file:
+      run = pickle.load(file)     # 記録（scikit-learn が無くても読める）
+      bundle = pickle.load(file)  # モデル（学習時と同じ版の scikit-learn などが要る）
+  ```
+
+- モデルは保存したときと同じ版の scikit-learn などで読む前提。版は記録の `versions` に残す。
 - 信頼できない pickle を読まない（pickle は読むときに任意のコードを実行できる）。README に書く。
 
 mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16。2026-11-26 に実装）:
 
 - たたき台の実装では、Pipeline の先頭が mloom の `ColumnSelector` だったので、pickle を読む環境にも mloom が要った。
 - `ColumnSelector` をやめ、scikit-learn の `ColumnTransformer([("keep", "passthrough", 候補列)], remainder="drop")` で列を選ぶ。その後ろは、前処理・採用した列の選択・推定器（「前処理」「特徴量選択」。たたき台の実装では前処理・`SelectKBest`・推定器だった）。
-- 読むときは、`pickle.load` の結果の `pipeline` の `predict` に、候補列（`run.json` の `candidate_columns`）を含む表（polars または pandas の DataFrame）を渡す。
+- 読むときは、2 段目のモデルの `pipeline` の `predict` に、候補列（記録の `candidate_columns`）を含む表（polars または pandas の DataFrame）を渡す。
 - 2026-11-26 に scikit-learn 1.9.1・polars 2.2.0 で確かめたこと:
   - polars と pandas の表のどちらでも予測できる。
   - 列の順を入れ替えても、余分な列があっても、同じ予測になる（`tests/test_optimize.py`）。
   - 候補列が無い表では、`ValueError: columns are missing` になる。
   - null がある整数の列と bool の列は、float64 の NaN になって欠損として扱われる（補完するモデルでも、補完しないモデルでも予測できることを、2026-11-26 に `ridge` と `hist_gradient_boosting` で確かめた）。
-  - pickle に `mloom` という文字列が含まれず、`sys.modules["mloom"] = None` で mloom の import を塞いだ Python でも読んで予測できる（`tests/test_predict.py`）。
-- 予測する環境には、学習時と同じ版の scikit-learn・numpy・scipy と、入力に使う polars か pandas が要る。版は `run.json` の `versions` を見て揃える。
-- pickle の中身は Pipeline ではなく、次の辞書にする。行のフィルタは scikit-learn の Pipeline に入れられないため（部品は行の数を変えられない。学習時は目的変数とずれ、予測時は入力の行と予測が対応しなくなる）。辞書と Pipeline には、mloom のクラス・関数・lambda を入れない。
+  - 2 段目（モデル）の pickle に `mloom` という文字列が含まれず、`sys.modules["mloom"] = None` で mloom の import を塞いだ Python でも読んで予測できる（`tests/test_predict.py`）。
+- 予測する環境には、学習時と同じ版の scikit-learn・numpy・scipy と、入力に使う polars か pandas が要る。版は記録の `versions` を見て揃える。
+- モデル（2 段目）は Pipeline ではなく、次の辞書にする。行のフィルタは scikit-learn の Pipeline に入れられないため（部品は行の数を変えられない。学習時は目的変数とずれ、予測時は入力の行と予測が対応しなくなる）。辞書と Pipeline には、mloom のクラス・関数・lambda を入れない。
 
 ```python
 {
     "pipeline": Pipeline,   # 列の選択 → 前処理 → 特徴量選択 → 推定器
-    "filters": [...],       # 「行のフィルタ」の定義。run.json の filters と同じ
+    "filters": [...],       # 「行のフィルタ」の定義。記録の filters と同じ
     "train_filters": [...], # 学習だけに効くフィルタ。予測では used_for_training の判定にだけ使う
     "training_rows": {      # 学習に使った行の照合用（「予測」）
         "columns": [...],       # ハッシュにする列（候補列 → 目的変数 → time_column → group_column の順）
@@ -503,8 +522,8 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
   - 予測時に、入力の `time_column` の値の種類（数値・真偽値・文字列・日時・日付）が `last_time` と違うとき、または日時のタイムゾーンの有無が違うときは、`InputError`（終了コード 2）で止める。整数・浮動小数・Decimal の列のように、種類が同じなら比べる（Decimal はクロスレビューの指摘で 2026-11-26 に対応）。
   - `time_column` が null か NaN の行は、学習期間の後の行にしない。
 - `shap_background`（2026-11-26 に Issue #6 で実装）は、最終モデルの学習に使った行の、推定器への入力（前処理と、採用した列の選択の後の値）の列ごとの平均（numpy の配列）。欠損は除いて平均する（欠損を扱えるモデルは補完しないことがあるため。基準は線形のモデルにだけ使い、線形のモデルは必ず補完する）。予測時には学習データが無いので、線形の SHAP の基準を `model.pkl` に入れる。
-- `Result.pipeline` は Pipeline を返す。`Result.model_bundle()` が上の辞書を作り、`Result.save` がそれを `model.pkl` に保存する。
-- mloom を使わずに予測する手順（README に書いた）: `pickle.load` → `filters` の条件を AND で評価 → 条件を満たす行だけ `pipeline.predict` → 満たさない行は NaN。条件を満たす行が 0 行なら `predict` を呼ばない（scikit-learn は 0 行の表でエラーになるため）。
+- `Result.pipeline` は Pipeline を返す。`Result.to_dict()` が記録を、`Result.model_bundle()` が上の辞書を作り、`Result.save` が 2 つを `model.pkl` に保存する（`mloom.model_file`）。戻り値は `model.pkl` のパス。
+- mloom を使わずに予測する手順（README に書いた）: `pickle.load` を 2 回（1 回目は記録、2 回目がモデル）→ `filters` の条件を AND で評価 → 条件を満たす行だけ `pipeline.predict` → 満たさない行は NaN。条件を満たす行が 0 行なら `predict` を呼ばない（scikit-learn は 0 行の表でエラーになるため）。
 
 ### 予測
 
@@ -532,7 +551,7 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
 - 行数と行の順は、入力と同じ。
 - `prediction`・`proba_*` は、`passed_filter` が true の行だけで計算する。true の行が 0 行なら `predict` を呼ばず、すべての行を NaN（分類の `prediction` は null）にする（2026-11-26 実装で決定）。
 - 次のときは `InputError`（終了コード 2）で止める（2026-11-26 実装で決定）:
-  - `model.pkl` が無い、または上の辞書でない。
+  - `model.pkl` が無い、1 段目が記録でない、2 段目が無い、または 2 段目が上の辞書でない（「`model.pkl`」）。
   - 入力に候補列か `filters` の列が無い。`filters` の値が列の型に合わない（学習時と同じ検査）。`passed_filter` が決まらないため。
   - 入力に目的変数があるのに、ハッシュにする列（`time_column`・`group_column`）が無い。
   - `--keep-columns` の列が入力に無い、出力の列と同じ名前（上書きを防ぐため）、または 2 回以上書かれている。出力の列は、その呼び出しで出す列すべて（`error`・`rmse`・`r2`・`cm`・`accuracy`・`precision`・`recall`・`shap_*` を含む。2026-11-26 Issue #6 で決定）。
@@ -616,7 +635,9 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   - 分類で、`positive_class` なしに `cm_predicted_threshold` を与えた（2026-11-26 実装で決定。与えた閾値が黙って無視されるのを防ぐため）。
 - 分類の実測が陽性かどうかも、`str(実測のクラス) == str(positive_class)` で決める。
 
-### `run.json`
+### 記録
+
+`model.pkl` の 1 段目（「`model.pkl`」）。`mloom show <model.pkl>` で JSON に出せ、`mloom.read_run(path)` で辞書として読める。以前は `run.json` として別のファイルに保存していた（2026-11-26、Issue #18 で `model.pkl` に入れた。キーと値は変えていない）。
 
 2026-11-26 の実装の形（値は例。正は `mloom.result.Result.to_dict`）。
 
@@ -707,14 +728,15 @@ result = mloom.optimize_model(
 )
 result.pipeline      # 学習済み Pipeline
 result.cv_scores     # CV のスコア
-result.save("outputs/ridge")  # model.pkl と run.json
+result.save("outputs/ridge")  # model.pkl（記録とモデル）。戻り値はそのパス
+mloom.read_run("outputs/ridge/model.pkl")  # 記録（「記録」）の辞書。モデルは読まない
 ```
 
 予測（2026-11-26 に実装）:
 
 ```python
 predictions = mloom.predict(
-    "outputs/ridge/model.pkl",     # または pickle.load で読んだ辞書
+    "outputs/ridge/model.pkl",     # または model.pkl の 2 段目の辞書
     "data/new.parquet",            # または polars.DataFrame
     keep_columns=("timestamp",),
     shap=False,                    # True で SHAP の寄与を足す
@@ -726,7 +748,7 @@ predictions = mloom.predict(
 # polars.DataFrame。入力と同じ行数・同じ順。フィルタの条件を満たさない行は NaN（「予測」）
 ```
 
-- `model` に読み込んだ辞書も渡せるのは、Notebook で読み込んだものを使い回せるようにするため。
+- `model` に読み込んだ辞書（2 段目）も渡せるのは、Notebook で読み込んだものを使い回せるようにするため。
 - 予測のモジュールは `mloom.prediction` にする（2026-11-26 実装で決定）。`mloom.predict` という名前のモジュールにすると、`mloom/__init__.py` が再エクスポートする関数 `mloom.predict` が、サブモジュールの属性を隠してしまうため。
 
 - 設定は `mloom.Config`（frozen dataclass）で渡す。CLI の引数と 1 対 1 に対応させる。データが要らない検査（モデル名、`task` とモデルの組み合わせ、CV に要る列の指定など）は `Config` を作った時点で行う。
@@ -739,7 +761,7 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 ```
 
 - CLI は引数を `Config` に変換し、`optimize_model` と `result.save` を呼ぶだけにする。
-- 標準出力の最後に `run.json` のパスを出す。進捗やログは標準エラーに出す。
+- 標準出力の最後に `model.pkl` のパスを出す。進捗やログは標準エラーに出す。
 
 フィルタ（2026-11-26 に実装。未決 19）:
 
@@ -756,9 +778,18 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 - CLI は Python API の予測を呼んで、結果を Parquet に保存するだけにする。`--shap`・`--cm-actual-threshold`・`--cm-predicted-threshold`・`--cm-positive`・`--positive-class` は、同じ名前の API の引数にそのまま渡す。`--keep-columns` は空白で区切って並べる（`--keep-columns timestamp lot`。`--exclude-columns` と同じ）。
 - 標準出力の最後の行に、出力の Parquet のパスを出す。終了コードは `mloom optimize` と同じ。
 
+記録の表示（2026-11-26、Issue #18）:
+
+```powershell
+uv run mloom show outputs/ridge/model.pkl
+```
+
+- `mloom.read_run` を呼び、記録を JSON（`ensure_ascii=False`、`indent=2`）で標準出力に出すだけにする。`> run.json` で、以前の `run.json` と同じ内容のファイルを作れる。
+- pickle を読むので、信頼できる出どころのファイルだけに使う。読めなければ終了コード 2。
+
 | 終了コード | 意味 |
 | --- | --- |
-| 0 | 成功。`model.pkl` と `run.json`（`predict` では予測の Parquet）を保存した |
+| 0 | 成功。`model.pkl`（`predict` では予測の Parquet）を保存した。`show` では記録を出した |
 | 1 | 想定外のエラー |
 | 2 | 入力の誤り（引数、データ、`unavailable-sensors.json`、`mloom.toml`、`--filters` のファイル、`model.pkl`） |
 
@@ -766,7 +797,7 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 
 - 本リポジトリの `skills/model-optimization/SKILL.md` に置く（2026-11-26 たたき台を作成。同日 Issue #7 で、配布と実行、`--filters`、`mloom predict`、前処理の設定に合わせて書き直した）。
 - 5 つの入力のうち足りないものはユーザーに聞く。CV の方法は Skill が推測して決めず、知っている列名を材料に聞き返す。
-- 役割は 2 つだけ: ユーザーの指定を CLI（`mloom optimize`・`mloom predict`）の引数に変換して実行する、結果（`run.json` と予測の出力）を読んで説明する。
+- 役割は 2 つだけ: ユーザーの指定を CLI（`mloom optimize`・`mloom predict`・`mloom show`）の引数に変換して実行する、結果（`mloom show` で出す記録と予測の出力）を読んで説明する。
 - どの列を除外するか、どう評価するか、探索空間、前処理の方式、何を保存するかを Skill で決めない。それらは Python 側で固定する。スコアや指標も Skill で計算せず、mloom が出した値を伝える。
 
 Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
@@ -807,7 +838,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
   - Claude Code: `New-Item -ItemType Junction -Path "$HOME\.claude\skills\model-optimization" -Target "<clone>\skills\model-optimization"`
   - Codex: `New-Item -ItemType Junction -Path "$HOME\.agents\skills\model-optimization" -Target "<clone>\skills\model-optimization"`
 - Claude Code の深さは、ドキュメントの記述と、この PC の 1 段のジャンクションで確かめた。2 段下に置いた `SKILL.md` が見つからないことは、Claude Code のセッションを別に起こさないと確かめられないので、試していない。1 段のジャンクションなら、どちらにしても見つかる。
-- 2026-11-26 に、`tmp/` に偽の利用側リポジトリ（サンプルデータ、`config/mloom.toml`、`config/unavailable-sensors.json`、`<output>/filters.json`）を作り、clone に `config/mloom.local.toml` を置いて、その直下で `SKILL.md` のテンプレートどおりに `uv run --project <clone> mloom optimize ... --filters ...` と `mloom predict ...`（回帰で `--shap` と混同行列、分類で `--positive-class`）を実行した。どれも終了コード 0 で、出力は偽の利用側リポジトリの中にでき、`run.json` の `settings.files` の `project` は利用側の `config\mloom.toml`（カレントディレクトリからの相対パス）、`local_defaults`・`defaults` は clone のファイル、`unavailable_sensors.path` は利用側の `config\unavailable-sensors.json` だった。予測の出力の列は `SKILL.md` の表と一致した。
+- 2026-11-26 に、`tmp/` に偽の利用側リポジトリ（サンプルデータ、`config/mloom.toml`、`config/unavailable-sensors.json`、`<output>/filters.json`）を作り、clone に `config/mloom.local.toml` を置いて、その直下で `SKILL.md` のテンプレートどおりに `uv run --project <clone> mloom optimize ... --filters ...` と `mloom predict ...`（回帰で `--shap` と混同行列、分類で `--positive-class`）を実行した。どれも終了コード 0 で、出力は偽の利用側リポジトリの中にでき、記録（当時の `run.json`）の `settings.files` の `project` は利用側の `config\mloom.toml`（カレントディレクトリからの相対パス）、`local_defaults`・`defaults` は clone のファイル、`unavailable_sensors.path` は利用側の `config\unavailable-sensors.json` だった。予測の出力の列は `SKILL.md` の表と一致した。
 
 ## 非機能要件（案）
 
@@ -833,7 +864,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 
 | モジュール | 責務 |
 | --- | --- |
-| `mloom` | 公開 API の再エクスポート（`optimize_model`、`predict`、`Config`、`Result`、例外） |
+| `mloom` | 公開 API の再エクスポート（`optimize_model`、`predict`、`read_run`、`Config`、`Result`、例外） |
 | `mloom.errors` | 例外（`InputError` は終了コード 2、それ以外は 1） |
 | `mloom.config` | `Config` の定義と、データが要らない検査 |
 | `mloom.metrics` | 評価指標と、タスクごとに選べる指標 |
@@ -845,10 +876,11 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.columns` | 列の除外と理由の記録 |
 | `mloom.cv` | ユーザーが指定した CV の分割 |
 | `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選ぶ。前処理の方式の決定と fit、採用した列の選択）と、保存した Pipeline の候補列・採用した列・推定器への入力の取り出し |
-| `mloom.clip` | クリップの上下限の計算と、`run.json` の `preprocessing.clip` |
+| `mloom.clip` | クリップの上下限の計算と、記録の `preprocessing.clip` |
 | `mloom.selection` | 特徴量選択のランク付け（Pipeline の外で、分割ごとに 1 回） |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
-| `mloom.result` | `Result` と保存（`model.pkl`、`run.json`） |
+| `mloom.result` | `Result`（記録とモデルの組み立て）と保存 |
+| `mloom.model_file` | `model.pkl` の形（1 段目の記録、2 段目のモデル）の書き出しと読み込み（`read_run`）。scikit-learn と numpy を import しない |
 | `mloom.dtypes` | 列の型を、フィルタと行のハッシュが比べる値の種類（数値、真偽値、文字列、日時、日付）として読む |
 | `mloom.filters` | 行のフィルタの定義の検査と適用 |
 | `mloom.row_hash` | 学習に使った行の照合用の、値による行のハッシュ |
@@ -872,23 +904,23 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`hist_gradient_boosting`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |
 | 9 | 選べるモデル | 表の 4 つで始める。API から任意の推定器と探索空間を渡せるようにするか |
 | 10 | 予測の入口 | **決定**（2026-11-26）: `mloom predict` の CLI と Python API を用意する。`pickle.load` だけでも予測できるようにする。→「予測」 |
-| 11 | HPO の試行の記録 | `run.json` は最良の試行だけ。全試行を `trials.csv` に出すか |
+| 11 | HPO の試行の記録 | 記録は最良の試行だけ。全試行を `trials.csv` に出すか |
 | 12 | Skill の配布方法 | **決定**（2026-11-26）: 各ベンダーの既定の置き場所に、clone の Skill を指すジャンクションを置く。→「配布と実行」 |
 | 13 | 利用環境への導入 | **決定**（2026-11-26）: 利用側リポジトリとは別に clone し、`uv run --project <clone>` で実行する。→「配布と実行」 |
 | 14 | 並列実行 | Optuna の `n_jobs` やモデルの `n_jobs` を使うか（再現性とのトレードオフ）。`HistGradientBoosting` の OpenMP のスレッド数は結果を変えない（2026-11-26 確認。「モデル」） |
 | 15 | 複数の目的変数 | 「まずは 1 個」の次の段階で、目的変数ごとに別の Pipeline を作るか、1 つのモデルで同時に予測するか |
 | 16 | pickle の読み込みに mloom が要る | **決定**（2026-11-26）: mloom への依存をなくし、`ColumnTransformer` で列を選ぶ。→「`model.pkl`」 |
-| 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、`run.json` と標準エラーに警告を出すか |
+| 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、記録と標準エラーに警告を出すか |
 | 18 | 予測時の無限大 | **決定**（2026-11-26）: 説明変数の無限大は、学習時も予測時も欠損とみなす。→「行の除外」 |
 | 19 | フィルタの渡し方 | **決定**（2026-11-26）: API は `Config.filters` と `Config.train_filters` に条件のリストを渡す。CLI では、両方を書いた JSON ファイルのパスを `--filters` で渡す。→「設定」「行のフィルタ」 |
 | 20 | 予測の出力の形 | **決定**（2026-11-26）: 予測値に加えて、指定した入力の列、フィルタの判定、学習に使った行か、分類の確率、`--shap` を付けたときの SHAP の寄与を出す。→「予測」 |
 
 ## 完了条件（v0.1、案）
 
-- Parquet と 5 つの入力（データ、`target`、`task`、`model`、`cv`）を渡すと、API と CLI のどちらからでも `model.pkl` と `run.json` が保存される。
+- Parquet と 5 つの入力（データ、`target`、`task`、`model`、`cv`）を渡すと、API と CLI のどちらからでも、記録とモデルを入れた `model.pkl` が保存される。
 - 回帰と分類、`cv` の 3 つの方法のそれぞれで動く。
-- `config/unavailable-sensors.json` にあるセンサの列が、採用した列に入らず、`run.json` に理由つきで残る。
-- `model.pkl` を `pickle.load` して、学習時と同じ列を持つ表に `predict` できる。
+- `config/unavailable-sensors.json` にあるセンサの列が、採用した列に入らず、記録に理由つきで残る。
+- `model.pkl` を 2 回 `pickle.load` して、2 段目のモデルで、学習時と同じ列を持つ表に `predict` できる。
 - 同じ入力と `seed` で 2 回実行すると、採用した列と最良のパラメータが一致する。
 - 表の 4 つのモデルそれぞれで、上の 4 つがテストで確かめられている。
 
@@ -896,7 +928,8 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 
 2026-11-26 の決定で、次の条件を足す（確かめたものには、その旨を書いた。ほかは未実装）:
 
-- mloom が無い環境で `model.pkl` を `pickle.load` し、README の手順で予測できる（2026-11-26 テストと README の手順で確認）。
+- mloom が無い環境で `model.pkl` を 2 回 `pickle.load` し、README の手順で予測できる（2026-11-26 テストと README の手順で確認。2 回の `pickle.load` は Issue #18 でテストを直して確認）。
+- `mloom optimize` の出力が `model.pkl` 1 つになり、記録は scikit-learn と numpy の無い Python でも読め、`mloom show` で JSON に出せる。記録の入っていない `model.pkl` は終了コード 2 で止まり、保存の途中で失敗しても前の `model.pkl` は壊れない（2026-11-26、Issue #18 のテストで確認）。
 - `mloom predict` で予測すると、入力と同じ行数・同じ順で予測が返り、フィルタの条件を満たさない行は NaN になる（2026-11-26 テストで確認）。
 - 学習に使った表をそのまま `mloom predict` に渡すと、最終モデルの学習に使った行だけで `used_for_training` が true になる（説明変数が同じで目的変数だけが欠損した行は false になる）（2026-11-26 テストで確認）。
 - 欠損を含むデータで、補完しない既定のまま `hist_gradient_boosting` と `random_forest` を学習できる（2026-11-26 テストで確認）。

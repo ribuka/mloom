@@ -78,7 +78,7 @@ def clip_bounds(x: np.ndarray, settings: ClipSettings) -> Bounds:
 
 
 def describe_clip(method: str, bounds: Bounds | None, columns: list[str]) -> dict[str, Any]:
-    """Describe the clipping for ``run.json`` (``preprocessing.clip``).
+    """Describe the clipping for the record of the run (``preprocessing.clip``).
 
     Parameters
     ----------

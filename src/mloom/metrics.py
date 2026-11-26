@@ -3,7 +3,7 @@
 Scores are computed with scikit-learn scorers, which are always "greater is
 better". A metric that is naturally minimized (``rmse``, ``mae``,
 ``log_loss``) uses the negated scorer, and ``report_value`` turns the score
-back into the natural value written to ``run.json``.
+back into the natural value written to the record of the run.
 """
 
 from dataclasses import dataclass
@@ -17,7 +17,7 @@ class Metric:
     Parameters
     ----------
     name : str
-        Name used in the config and in ``run.json``.
+        Name used in the config and in the record of the run.
     scorer : str
         Name of the scikit-learn scorer.
     negated : bool

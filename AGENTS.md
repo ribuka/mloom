@@ -6,14 +6,14 @@
   - When you are making a change on a branch and a decision is made or a fact is verified, update `docs/spec.md` in the same change.
   - For investigation, questions, or review requests, do NOT edit `docs/spec.md`. Report findings in your reply (or an Issue comment) instead.
 - This repository is in development (0.x); backward compatibility is NOT required.
-  - NEVER add or keep compatibility layers, deprecated aliases, or readers for older `run.json` formats.
+  - NEVER add or keep compatibility layers, deprecated aliases, or readers for older formats of `model.pkl` or of the run record in it.
 - Coding rules for every language (keeping the code easy to change): [.agents/docs/coding.md](.agents/docs/coding.md)
 
 ## Responsibilities of the library and the Skill
 
 - The Python API is the only place that decides which columns are excluded, how models are evaluated, and what is saved.
 - The CLI only turns its arguments into the API's config, calls the API, and saves the result. NEVER put processing logic in the CLI.
-- The Skill (`SKILL.md`) only turns the user's request into CLI arguments and explains `run.json`. NEVER make it decide columns, evaluation, or search spaces.
+- The Skill (`SKILL.md`) only turns the user's request into CLI arguments and explains the run record (`mloom show`). NEVER make it decide columns, evaluation, or search spaces.
 
 ## Working tree
 
