@@ -1,11 +1,11 @@
 ---
 name: model-optimization
-description: Optimize a machine-learning model on a Parquet file with mloom - exclude unavailable sensors, select features, tune hyperparameters with CV, and save the fitted pipeline with the record of the run as model.pkl - or predict a Parquet file with a saved model.pkl (scores, confusion matrix, SHAP contributions), then explain the result. Use when the user asks to build, tune, or optimize a regression or classification model (ridge, pls, random_forest, lightgbm) on Parquet data, or to predict with a model mloom saved, e.g. "この Parquet で品質を予測するモデルを最適化して", "lightgbm で特徴量選択とハイパラ探索をして", "この model.pkl で新しいデータを予測して".
+description: Optimize a machine-learning model on a Parquet file with mloom - exclude unavailable sensors, select features, tune hyperparameters with CV, and save the fitted pipeline with the record of the run as model.pkl - or refit a saved model.pkl on new data the same way it was made, without a search - or predict a Parquet file with a saved model.pkl (scores, confusion matrix, SHAP contributions), then explain the result. Use when the user asks to build, tune, or optimize a regression or classification model (ridge, pls, random_forest, lightgbm) on Parquet data, or to refit or predict with a model mloom saved, e.g. "この Parquet で品質を予測するモデルを最適化して", "lightgbm で特徴量選択とハイパラ探索をして", "データが増えたので、このモデルを再学習して", "この model.pkl で新しいデータを予測して".
 ---
 
 # Model optimization
 
-Turn the user's request into one `mloom optimize` or `mloom predict` command,
+Turn the user's request into one `mloom optimize`, `mloom refit` or `mloom predict` command,
 run it, and explain the result. mloom decides which columns are excluded, how
 models are evaluated, the search spaces, the preprocessing, and what is saved;
 this skill never decides them.
@@ -112,11 +112,30 @@ Read that output and report, in the user's language:
 - `filters` and `train_filters` as they were passed, when they are not empty.
 - The settings: `settings.columns`, `settings.preprocessing`, `settings.clip`, `settings.impute`, `settings.selection` and `settings.importance` with `settings.sources` (the file each value came from) and `settings.files` (the files read, with `found`). For clipping, also `preprocessing.clip`: the method, the lower and upper bounds of each column (`bounds`) and the columns not clipped (`unclipped_columns`). For imputation, also `preprocessing.impute.method`: the method the final model used, with `auto` resolved for the model (`settings.impute.method` keeps the value as set, `auto` included).
 - `best_params`, and `hpo.n_trials_failed` when it is not 0.
-- Where `model.pkl` is, and that `mloom predict` predicts with it (section 6). Warn that a pickle must only be loaded from a trusted source.
+- Where `model.pkl` is, and that `mloom predict` predicts with it (section 7). Warn that a pickle must only be loaded from a trusted source.
 
 Do not claim that a score is good or bad without the user's baseline; compare only when the user gives one or asks for several runs.
 
-## 6. Run `mloom predict` (when the user asks for predictions)
+## 6. Run `mloom refit` (when the user asks to refit an existing model)
+
+Use it when the user asks to train an existing `model.pkl` again on new or more data, the same way it was made (the same selected columns, parameters, settings, filters and CV method). It searches nothing, so it has no `--target`, `--model`, `--cv` or other arguments of `mloom optimize`: they come from the record of the base.
+
+```powershell
+uv run --project "<clone>" mloom refit <data.parquet> --base <base model.pkl> --output <directory> [--filters <output>/filters.json] [--unavailable-sensors <file>] [--settings <file>]
+```
+
+- Read the record of the base first (`mloom show <base model.pkl>`). When it has `train_filters`, show them and ask whether the new data should be trained with the same conditions (a training period often needs to grow with the data). Write only the conditions the user gives to `<output>/filters.json` (section 3) and pass `--filters`. `--filters` replaces both `filters` and `train_filters` of the base (a key missing from the file is empty), so when the base has `filters` too, ask whether to keep them, and copy them into the file only when the user says so. Without `--filters`, the conditions of the base are used.
+- Choose `--output` as `<directory of the base model.pkl>-refit` unless the user names a directory. Tell the user that an existing `model.pkl` there is overwritten. The directory of the base itself is refused (exit code 2).
+- `--unavailable-sensors` and `--settings`: only when the user asks, as for `mloom optimize`. Without `--settings`, the settings recorded in the base are used.
+- `warning:` lines on stderr name the columns of the base that could not be used. Exit codes are those of section 4.
+- Explain the record as in section 5, and also:
+  - `base.dropped_columns`, whenever it is not empty: the selected columns of the base that were dropped, with their `reason`. ALWAYS tell the user, since the model now behaves differently from the base.
+  - `hpo` and `selection` are `null`: nothing was searched.
+  - Do not compare `cv_scores` with `base.cv_scores` as they are: they come from different data (and the base selected the columns again on each fold).
+  - `cv_scores` of the refit can be optimistic: its columns and parameters were chosen on the data of the base, which may overlap the test rows of the new folds.
+  - Recommend checking the model on data after its training period with `mloom predict` (section 7).
+
+## 7. Run `mloom predict` (when the user asks for predictions)
 
 ```powershell
 uv run --project "<clone>" mloom predict <model.pkl> <data.parquet> --output <predictions.parquet> [--keep-columns <column> ...] [--shap] [--cm-actual-threshold <x> --cm-predicted-threshold <y> --cm-positive <above|below> | --positive-class <class> [--cm-predicted-threshold <p>]]
@@ -130,7 +149,7 @@ uv run --project "<clone>" mloom predict <model.pkl> <data.parquet> --output <pr
   - Classification: `--positive-class`, and `--cm-predicted-threshold` (of the probability of that class; default 0.5) only when the user gives it.
 - The input needs the candidate columns (`candidate_columns` of the run record, from `mloom show`) and the columns of `filters`. When it has the target column, it also needs `cv.time_column` and `cv.group_column` when they are set. mloom stops with exit code 2 otherwise.
 
-## 7. Explain the predictions
+## 8. Explain the predictions
 
 Read the output Parquet (for example with `uv run --project "<clone>" python -c "import polars as pl; ..."`) and explain its columns:
 

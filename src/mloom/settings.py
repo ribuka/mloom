@@ -1,4 +1,4 @@
-"""Reading the settings: ``config/mloom.toml`` and its defaults.
+"""Reading the settings: ``config/mloom.toml`` and its defaults, or the record of a base model.
 
 A key is read from the first of these files that sets it (see "設定ファイル"
 in ``docs/spec.md``):
@@ -13,6 +13,9 @@ in ``docs/spec.md``):
 A key is named by its table and its name (``[clip] method`` and ``[impute]
 method`` are different keys). An unknown table or key, or an invalid value, is
 an error in every file, so that a typo does not silently keep the default.
+
+``mloom refit`` reads instead the settings recorded in its base ``model.pkl``
+(``settings_from_record``; see "ベースのモデル" in ``docs/spec.md``).
 """
 
 import math
@@ -215,7 +218,8 @@ class SettingsFile:
     Parameters
     ----------
     role : str
-        ``"project"``, ``"local_defaults"`` or ``"defaults"``.
+        ``"project"``, ``"local_defaults"`` or ``"defaults"``; ``"base"`` for
+        the settings recorded in a base ``model.pkl`` (``settings_from_record``).
     path : str
         Path of the file.
     found : bool
@@ -341,6 +345,56 @@ def load_settings(path: Path | None) -> Settings:
         **{table: settings(**values[table]) for table, (settings, _) in _TABLES.items()},
         sources=sources,
         files=looked_up,
+    )
+
+
+def settings_from_record(recorded: object, source: str) -> Settings:
+    """Read the settings recorded in the record of a run (``Settings.to_dict``).
+
+    Every key of every table must be there, with a value the same checks as
+    in ``mloom.toml`` accept. ``sources`` and ``files`` of the record, and
+    keys mloom does not know, are not read.
+
+    Parameters
+    ----------
+    recorded : object
+        ``settings`` of the record.
+    source : str
+        Where the record was read from (the path of a base ``model.pkl``):
+        every key is recorded as read from it, and it is the only file
+        looked up, as ``role`` ``"base"``.
+
+    Returns
+    -------
+    Settings
+        The settings.
+
+    Raises
+    ------
+    InputError
+        When a table or a key is missing or a value is invalid; the message
+        names it as ``settings.<table>.<key>``.
+    """
+    if not isinstance(recorded, dict):
+        raise InputError(f"settings must be a dict; got {recorded!r}")
+    values: dict[str, dict[str, Any]] = {}
+    for table_name, (_, checks) in _TABLES.items():
+        table = recorded.get(table_name)
+        if not isinstance(table, dict):
+            raise InputError(f"settings.{table_name} is missing or not a dict")
+        values[table_name] = {}
+        for key, check in checks.items():
+            if key not in table:
+                raise InputError(f"settings.{table_name}.{key} is missing")
+            try:
+                values[table_name][key] = check(table[key])
+            except (TypeError, ValueError) as error:
+                raise InputError(f"settings.{table_name}.{key} {error}") from error
+    _check_quantiles(values["clip"], "settings.clip")
+    return Settings(
+        **{table: settings(**values[table]) for table, (settings, _) in _TABLES.items()},
+        sources={table: dict.fromkeys(checks, source) for table, (_, checks) in _TABLES.items()},
+        files=[SettingsFile(role="base", path=source, found=True)],
     )
 
 

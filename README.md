@@ -64,6 +64,22 @@ uv run mloom show outputs/quality-lgbm/model.pkl
 - 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式、似た列をまとめる相関のしきい値（`[selection] max_correlation`）、permutation importance の繰り返し回数（`[importance] n_repeats`）を変えられます（下の「前処理」「特徴量選択」「解釈」）。
 - `unavailable-sensors.json` と `mloom.toml` は、mloom を使う側のリポジトリの `config/` に置きます。
 
+## 再学習（refit）
+
+データが増えたときに、前に作ったモデルと同じ作り方（採用した列、最良のパラメータ、設定の値、フィルタ、CV の方法）のまま学習し直せます。探索はしません。
+
+```powershell
+uv run mloom refit data/sample.parquet --base outputs/quality-lgbm/model.pkl --output outputs/quality-lgbm-refit
+```
+
+- `--base` にベースの `model.pkl` を渡します。読むのは中の記録だけなので、scikit-learn の版が変わってモデルが読めなくなっていても再学習できます。目的変数・モデル・CV の方法などの引数は無く、記録から読みます。
+- 学習期間の条件を変えたいときは、`--filters` にフィルタのファイル（下の「行のフィルタ」）を渡します。`filters` と `train_filters` の両方がそのファイルの内容に置き換わります（片方のキーが無ければ空）。渡さなければベースの条件のままです。
+- `--unavailable-sensors` は `optimize` と同じく今のファイルを読みます（ベースの後で壊れたセンサを外すため）。`--settings` は、渡さなければベースの記録の設定の値を使い、渡せば `optimize` と同じく読みます。
+- ベースが採用した列が使えなくなっていれば、その列を外して学習し、`warning:` の行と、記録の `base.dropped_columns` に理由を残します。1 列も残らなければ終了コード 2 です。
+- `--output` にベースと同じディレクトリは指定できません（終了コード 2。ベースを上書きしないため）。
+- 記録の `base` に、ベースのパスと、ベースを作ったときの `cv_scores` などが残ります。`base.cv_scores` はベースを作ったときのデータでのスコアなので、今回の `cv_scores` とそのまま比べられません。また今回の `cv_scores` は、ベースのデータで選んだ列とパラメータで計算するので、楽観的になりえます。学習期間の後のデータで `mloom predict` のスコア（下の「予測」）を確かめてください。
+- 記録の `hpo` と `selection` は `null` です。`model.pkl` は `optimize` のものと同じく、`mloom predict`・`mloom show`・`pickle.load` で使えます。
+
 ## 設定の既定値
 
 使う側の `config/mloom.toml` に無いキーは、mloom リポジトリの次のファイルから読みます（上ほど優先）。
@@ -135,6 +151,11 @@ print(result.cv_scores, result.selected_columns)
 print(result.interpretation)  # 重要度・係数・VIP（「解釈」）
 result.save("outputs/quality-ridge")  # outputs/quality-ridge/model.pkl を返す
 run = mloom.read_run("outputs/quality-ridge/model.pkl")  # 記録の辞書（mloom show と同じ内容）
+
+# 再学習（「再学習（refit）」）。ベースの記録だけを読み、探索せずに学習し直す
+base = mloom.load_base("outputs/quality-ridge/model.pkl")
+refit = mloom.refit_model("data/sample.parquet", base)  # filters・train_filters・settings を渡すと差し替える
+refit.save("outputs/quality-ridge-refit")
 ```
 
 ## 行のフィルタ

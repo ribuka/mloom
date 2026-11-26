@@ -1,6 +1,7 @@
 """Tests of the ``mloom`` command line."""
 
 import json
+import os
 import pickle
 from importlib.metadata import version
 from pathlib import Path
@@ -284,3 +285,81 @@ def test_invalid_confusion_arguments_exit_with_2(
     assert main([*command, *extra]) == EXIT_INPUT
     assert message in capsys.readouterr().err
     assert not output.exists()
+
+
+def test_refit_keeps_the_filters_of_the_base_unless_a_file_is_given(
+    first_half_model: Path, data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``refit`` saves model.pkl and prints its path; ``--filters`` replaces the filters of the base.
+
+    The saved model.pkl is shown and predicts like that of ``optimize``.
+    """
+    base = read_run(first_half_model)
+    refit_dir = tmp_path / "refit"
+    assert main(["refit", str(data_path), "--base", str(first_half_model), "--output", str(refit_dir)]) == EXIT_OK
+    model_path = Path(capsys.readouterr().out.strip().splitlines()[-1])
+    assert model_path == refit_dir / "model.pkl"
+    run = read_run(model_path)
+    assert (run["filters"], run["train_filters"]) == (base["filters"], base["train_filters"])
+    assert run["data"]["n_rows_train_filtered_out"] == base["data"]["n_rows_train_filtered_out"] == 60
+    assert run["base"]["path"] == str(first_half_model)
+    assert (run["hpo"], run["selection"]) == (None, None)
+
+    assert main(["show", str(model_path)]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out) == run
+    predictions = tmp_path / "predictions.parquet"
+    assert main(["predict", str(model_path), str(data_path), "--output", str(predictions)]) == EXIT_OK
+    assert pl.read_parquet(predictions).height == pl.read_parquet(data_path).height
+
+    wider = tmp_path / "wider.json"
+    wider.write_text(json.dumps({"train_filters": [{"column": "t", "op": "lt", "value": 90}]}), encoding="utf-8")
+    args = ["refit", str(data_path), "--base", str(first_half_model), "--output", str(refit_dir), "--filters"]
+    assert main([*args, str(wider)]) == EXIT_OK
+    run = read_run(model_path)
+    assert (run["filters"], run["train_filters"]) == ([], [{"column": "t", "op": "lt", "value": 90}])
+    assert run["data"]["n_rows_train_filtered_out"] == 30
+
+
+def test_refit_warns_of_dropped_columns_and_stops_without_any(
+    first_half_model: Path, frame: pl.DataFrame, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each dropped column is a ``warning:`` line on stderr; with no column left, the exit code is 2."""
+    selected = read_run(first_half_model)["selected_columns"]
+    sensors = tmp_path / "sensors.json"
+    sensors.write_text(json.dumps({"sensors": [{"name": selected[0]}]}), encoding="utf-8")
+    common = ["--base", str(first_half_model), "--output", str(tmp_path / "refit"), "--unavailable-sensors"]
+
+    frame.write_parquet(tmp_path / "all.parquet")
+    assert main(["refit", str(tmp_path / "all.parquet"), *common, str(sensors)]) == EXIT_OK
+    assert f"warning: column {selected[0]!r} of the base is dropped: unavailable_sensor" in capsys.readouterr().err
+
+    frame.drop(selected[1:]).write_parquet(tmp_path / "fewer.parquet")
+    assert main(["refit", str(tmp_path / "fewer.parquet"), *common, str(sensors)]) == EXIT_INPUT
+    assert "error: no column the base selected is left as a candidate" in capsys.readouterr().err
+
+
+def test_refit_of_an_invalid_base_exits_with_2(data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A base without a record stops with exit code 2 before the data is read."""
+    old = tmp_path / "old" / "model.pkl"
+    old.parent.mkdir()
+    old.write_bytes(pickle.dumps({"pipeline": None}))
+    args = ["refit", str(tmp_path / "missing.parquet"), "--base", str(old), "--output", str(tmp_path / "out")]
+    assert main(args) == EXIT_INPUT
+    assert "make it again with mloom optimize" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("output", ["model", "./model", "model/", f"model{os.sep}", "./model/../model"])
+def test_refit_over_its_base_exits_with_2_before_reading_the_data(
+    first_half_model: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    output: str,
+) -> None:
+    """The directory of the base, however it is written, stops with exit code 2; the base is not touched."""
+    monkeypatch.chdir(tmp_path)
+    before = (first_half_model.stat().st_mtime_ns, first_half_model.read_bytes())
+    args = ["refit", "missing.parquet", "--base", str(first_half_model), "--output", output]
+    assert main(args) == EXIT_INPUT
+    assert "would overwrite the base" in capsys.readouterr().err
+    assert (first_half_model.stat().st_mtime_ns, first_half_model.read_bytes()) == before

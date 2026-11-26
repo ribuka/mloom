@@ -2,18 +2,21 @@
 
 It holds no processing of its own (see "CLI" in ``docs/spec.md``). Exit
 codes: 0 on success, 2 for invalid input (including invalid arguments), 1
-for any other error. The last line of stdout of ``optimize`` and ``predict``
-is the path of the saved file (``model.pkl``, the predictions); ``show``
-prints the record of the run as JSON. Progress and errors go to stderr.
+for any other error. The last line of stdout of ``optimize``, ``refit`` and
+``predict`` is the path of the saved file (``model.pkl``, the predictions);
+``show`` prints the record of the run as JSON. Progress, warnings (as
+``warning:`` lines) and errors go to stderr.
 """
 
 import argparse
 import json
 import sys
 import traceback
+import warnings
 from pathlib import Path
 
 import mloom
+from mloom.base import check_output, load_base
 from mloom.config import (
     CV_METHODS,
     DEFAULT_SETTINGS,
@@ -29,6 +32,7 @@ from mloom.model_file import read_run
 from mloom.models import MODELS
 from mloom.optimize import optimize_model
 from mloom.prediction import PASSED_FILTER, predict
+from mloom.refit import refit_model
 from mloom.result import Result
 
 EXIT_OK = 0
@@ -60,12 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     metrics = sorted({name for task_metrics in METRICS.values() for name in task_metrics})
     optimize.add_argument("--metric", choices=metrics, help="default: rmse (regression), log_loss (classification)")
     optimize.add_argument("--exclude-columns", nargs="*", default=[], metavar="COLUMN")
-    optimize.add_argument(
-        "--unavailable-sensors",
-        type=Path,
-        default=DEFAULT_UNAVAILABLE_SENSORS,
-        help=f"JSON of sensors not to use (default: {DEFAULT_UNAVAILABLE_SENSORS})",
-    )
+    _add_sensors_and_filters(optimize)
     optimize.add_argument(
         "--settings",
         type=Path,
@@ -75,16 +74,23 @@ def build_parser() -> argparse.ArgumentParser:
             "keys it does not set come from the defaults of mloom"
         ),
     )
-    optimize.add_argument(
-        "--filters",
-        type=Path,
-        help='JSON {"filters": [...], "train_filters": [...]} of the conditions on the rows',
-    )
     optimize.add_argument("--n-trials", type=int, default=100)
     optimize.add_argument("--timeout", type=float, help="seconds")
     optimize.add_argument("--seed", type=int, default=0)
+    refit = commands.add_parser(
+        "refit", help="fit the columns and parameters of a base model.pkl on new data, without a search"
+    )
+    refit.add_argument("data", type=Path, help="Parquet file")
+    refit.add_argument("--base", required=True, type=Path, help="model.pkl whose record tells how to make the model")
+    refit.add_argument("--output", required=True, type=Path, help="directory for model.pkl; not that of --base")
+    _add_sensors_and_filters(refit)
+    refit.add_argument(
+        "--settings",
+        type=Path,
+        help="project settings, read as optimize reads them (default: the settings recorded in --base)",
+    )
     predict_parser = commands.add_parser("predict", help="predict every row of a Parquet file with a model.pkl")
-    predict_parser.add_argument("model", type=Path, help="model.pkl saved by optimize")
+    predict_parser.add_argument("model", type=Path, help="model.pkl saved by optimize or refit")
     predict_parser.add_argument("data", type=Path, help="Parquet file")
     predict_parser.add_argument("--output", required=True, type=Path, help="Parquet file of the predictions")
     predict_parser.add_argument("--keep-columns", nargs="*", default=[], metavar="COL", help="input columns to copy")
@@ -98,8 +104,22 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--cm-positive", choices=POSITIVE_SIDES, help="side of the thresholds that is positive")
     predict_parser.add_argument("--positive-class", help="positive class of the confusion matrix (classification)")
     show = commands.add_parser("show", help="print the record of the run in a model.pkl as JSON")
-    show.add_argument("model", type=Path, help="model.pkl saved by optimize")
+    show.add_argument("model", type=Path, help="model.pkl saved by optimize or refit")
     return parser
+
+
+def _add_sensors_and_filters(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--unavailable-sensors",
+        type=Path,
+        default=DEFAULT_UNAVAILABLE_SENSORS,
+        help=f"JSON of sensors not to use (default: {DEFAULT_UNAVAILABLE_SENSORS})",
+    )
+    parser.add_argument(
+        "--filters",
+        type=Path,
+        help='JSON {"filters": [...], "train_filters": [...]} of the conditions on the rows',
+    )
 
 
 def to_config(args: argparse.Namespace) -> Config:
@@ -156,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         Exit code.
     """
     args = build_parser().parse_args(argv)
-    run = {"optimize": _optimize, "predict": _predict, "show": _show}[args.command]
+    run = {"optimize": _optimize, "refit": _refit, "predict": _predict, "show": _show}[args.command]
     try:
         output = run(args)
     except InputError as error:
@@ -171,6 +191,26 @@ def main(argv: list[str] | None = None) -> int:
 
 def _optimize(args: argparse.Namespace) -> Path:
     result = optimize_model(args.data, to_config(args))
+    model_path = result.save(args.output)
+    _print_summary(result)
+    return model_path
+
+
+def _refit(args: argparse.Namespace) -> Path:
+    base = load_base(args.base)
+    check_output(args.output, args.base)
+    filters, train_filters = load_filters(args.filters) if args.filters is not None else (None, None)
+    with warnings.catch_warnings(record=True) as caught:
+        result = refit_model(
+            args.data,
+            base,
+            filters=filters,
+            train_filters=train_filters,
+            unavailable_sensors=args.unavailable_sensors,
+            settings=args.settings,
+        )
+    for warning in caught:
+        print(f"warning: {warning.message}", file=sys.stderr)
     model_path = result.save(args.output)
     _print_summary(result)
     return model_path

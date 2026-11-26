@@ -10,7 +10,7 @@ import polars as pl
 import pytest
 
 import mloom.interpretation
-import mloom.optimize
+import mloom.training
 from mloom import Config, optimize_model
 from mloom.interpretation import Importance, pls_vip
 from mloom.models import MODELS
@@ -91,13 +91,13 @@ def test_baselines_are_the_scores_of_the_best_trial(
     """The models refitted on each fold score on their test side what the best trial scored."""
     frame = strong_and_weak.with_columns(c=pl.when(pl.col("y") > 0).then(pl.lit("pos")).otherwise(pl.lit("neg")))
     measured: list[Importance] = []
-    original = mloom.optimize.permutation_importance
+    original = mloom.training.permutation_importance
 
     def record(*args: Any) -> Importance:  # noqa: ANN401 - passed through
         measured.append(original(*args))
         return measured[-1]
 
-    monkeypatch.setattr(mloom.optimize, "permutation_importance", record)
+    monkeypatch.setattr(mloom.training, "permutation_importance", record)
     target = "y" if task == "regression" else "c"
     config = make_config(model=model, task=task, target=target, exclude_columns=("y", "c"))
     result = optimize_model(frame, config)
@@ -128,7 +128,7 @@ def test_zero_repeats_computes_no_importance(
     def fail(*args: Any) -> None:  # noqa: ANN401 - any arguments
         raise AssertionError("a fold was fitted")
 
-    monkeypatch.setattr(mloom.interpretation, "_fit_fold", fail)
+    monkeypatch.setattr(mloom.interpretation, "fit_fold", fail)
     run = optimize_model(strong_and_weak, make_config(model=model, settings=_importance_settings(tmp_path, 0))).to_dict()
     interpretation = run["interpretation"]
     assert interpretation["permutation_importance"] is None
