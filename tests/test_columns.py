@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from mloom.columns import check_columns, plan_columns
+from mloom.columns import check_columns, check_role_values, plan_columns
 from mloom.config import Config
 from mloom.errors import InputError
 from mloom.sensors import UnavailableSensors
@@ -107,4 +107,4 @@ def test_role_column_with_missing_values_raises(frame: pl.DataFrame, make_config
     """A time or group column with missing values cannot split the rows."""
     data = frame.with_columns(lot=pl.when(pl.col("t") == 0).then(None).otherwise(pl.col("lot")))
     with pytest.raises(InputError, match="has missing values"):
-        check_columns(data, make_config(cv="group", group_column="lot"), NO_SENSORS)
+        check_role_values(data, make_config(cv="group", group_column="lot"))

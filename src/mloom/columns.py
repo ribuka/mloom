@@ -54,7 +54,7 @@ class ColumnPlan:
 
 
 def check_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSensors) -> None:
-    """Check that the columns the config names exist and are usable.
+    """Check that the columns the config names exist and the target may be used.
 
     Parameters
     ----------
@@ -75,6 +75,24 @@ def check_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSenso
             raise InputError(f"column {name!r} is not in the data")
     if config.target in sensors.reasons:
         raise InputError(f"target {config.target!r} is listed as an unavailable sensor")
+
+
+def check_role_values(frame: pl.DataFrame, config: Config) -> None:
+    """Check that ``time_column`` and ``group_column`` have no missing value.
+
+    Parameters
+    ----------
+    frame : pl.DataFrame
+        The rows left after the row filters; the rows the filters removed
+        are not used, so they may have missing values.
+    config : Config
+        The config of the run.
+
+    Raises
+    ------
+    InputError
+        When a role column has a missing value.
+    """
     for name in config.role_columns:
         if frame[name].null_count() > 0:
             raise InputError(f"column {name!r} has missing values")

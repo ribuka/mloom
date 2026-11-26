@@ -13,7 +13,7 @@ import polars as pl
 from sklearn.metrics import get_scorer
 from sklearn.pipeline import Pipeline
 
-from mloom.columns import check_columns, plan_columns
+from mloom.columns import check_columns, check_role_values, plan_columns
 from mloom.config import Config
 from mloom.cv import CVPlan, order_rows, plan_cv
 from mloom.data import Data, load_data
@@ -57,6 +57,7 @@ def optimize_model(data: Data, config: Config) -> Result:
     sensors = load_unavailable_sensors(config.unavailable_sensors)
     settings = load_settings(config.settings)
     check_columns(frame, config, sensors)
+    check_role_values(frame, config)
     training = select_rows(frame, config, sensors, use_unlabeled=settings.use_unlabeled_rows)
     rows = order_rows(training.labeled, config)
     y = _target(rows, config)
