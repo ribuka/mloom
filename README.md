@@ -61,20 +61,60 @@ print(result.cv_scores, result.selected_columns)
 result.save("outputs/quality-ridge")
 ```
 
+## 行のフィルタ
+
+`--filters` に JSON ファイルを渡すと、学習と予測に使う行を絞れます（API では `Config(filters=..., train_filters=...)`）。
+
+```json
+{
+  "filters": [{"column": "FI-101", "op": "gt", "value": 0}],
+  "train_filters": [{"column": "timestamp", "op": "lt", "value": "2026-10-01T00:00:00"}]
+}
+```
+
+- `filters` は学習と予測の両方に効きます。`train_filters` は学習だけに効き、予測では行を絞りません。
+- 条件どうしは AND です。`op` は `eq`・`ne`・`lt`・`le`・`gt`・`ge`・`is_in`・`is_between`・`is_null`・`is_not_null`・`str_contains_all`・`str_contains_any` です。意味とエラーになる場合は [docs/spec.md](docs/spec.md) の「行のフィルタ」を見てください。
+- 外した行数は `run.json` の `data`（`n_rows_filtered_out`・`n_rows_train_filtered_out`）に残ります。
+
 ## 予測
+
+```powershell
+uv run mloom predict outputs/quality-ridge/model.pkl data/new.parquet --output outputs/quality-ridge/predictions.parquet --keep-columns timestamp
+```
+
+```python
+predictions = mloom.predict("outputs/quality-ridge/model.pkl", "data/new.parquet", keep_columns=("timestamp",))
+```
+
+- 入力と同じ行数・同じ順で、`--keep-columns` の列、`prediction`、`passed_filter`、`used_for_training`、分類では `proba_<クラス>` を返します。
+- `filters` の条件を満たさない行は予測せず、`prediction` を NaN（分類では null）にします。
+- `used_for_training` は、最終モデルの学習に使った行だけが true です。入力に目的変数の列か `train_filters` の列が無いときは null です。
+- 入力には、候補列（`run.json` の `candidate_columns`）と、`filters` に使う列が要ります。目的変数の列があるときは、`time_column`・`group_column` の列も要ります（学習に使った行の照合のため）。無ければ終了コード 2 で止まります。列の順は問わず、余分な列は無視されます。
+
+### mloom を使わずに予測する
+
+`model.pkl` は、mloom が無い環境でも読めます（学習時と同じ版の scikit-learn・numpy・scipy は要ります。版は `run.json` の `versions` にあります）。中身は `pipeline`、`filters`、`train_filters`、`training_rows` の辞書です。
 
 ```python
 import pickle
 
+import numpy as np
 import polars as pl
 
 with open("outputs/quality-ridge/model.pkl", "rb") as file:
-    pipeline = pickle.load(file)
-pipeline.predict(pl.read_parquet("data/new.parquet"))
+    bundle = pickle.load(file)
+data = pl.read_parquet("data/new.parquet")
+# filters を AND で評価する（eq・lt などの比較だけの例）。欠損の行は条件を満たさない
+conditions = [getattr(pl.col(f["column"]), f["op"])(f["value"]).fill_null(False) for f in bundle["filters"]]
+passed = data.with_columns(passed=pl.all_horizontal(pl.lit(True), *conditions))["passed"]
+prediction = np.full(data.height, np.nan)  # 条件を満たさない行は NaN
+if passed.any():  # 0 行では predict を呼ばない
+    prediction[passed.to_numpy()] = bundle["pipeline"].predict(data.filter(passed))
 ```
 
-- 表には `run.json` の `candidate_columns` が含まれていれば足ります。列の順は問わず、余分な列は無視されます。
-- 読む環境にも mloom が要ります（Pipeline の先頭が mloom の `ColumnSelector` のため）。
+- `pipeline` の `predict` に渡す表には、候補列があれば足ります（列の順は問わず、余分な列は無視されます）。`filters` を評価するには、その列も要ります。
+- 例は、比較の演算子（`eq`・`lt` など）の `filters` だけを扱います。ほかの演算子、日時の値（ISO 8601 の文字列を列の型に変換して比べる）、浮動小数の列の NaN（`mloom predict` では欠損として条件を満たさない）は、[docs/spec.md](docs/spec.md) の「行のフィルタ」に合わせて書き足してください。
+- 分類では、`prediction` を `np.full(data.height, None, dtype=object)` で用意します。
 - `model.pkl` は pickle です。pickle は読むときに任意のコードを実行できるため、信頼できないファイルは読まないでください。
 
 ## 開発

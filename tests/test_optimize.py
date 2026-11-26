@@ -19,14 +19,14 @@ MODEL_TASKS = [(model, task) for model, spec in MODELS.items() for task in spec.
 def test_every_model_fits_saves_and_predicts(
     frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, model: str, task: str
 ) -> None:
-    """Each model and task saves a pipeline that predicts from the table."""
+    """Each model and task saves a ``model.pkl`` whose pipeline predicts from the table."""
     target = "y" if task == "regression" else "c"
     result = optimize_model(frame, make_config(model=model, task=task, target=target))
     run_path = result.save(tmp_path)
 
     with (tmp_path / "model.pkl").open("rb") as file:
-        pipeline = pickle.load(file)
-    predictions = pipeline.predict(frame)
+        bundle = pickle.load(file)
+    predictions = bundle["pipeline"].predict(frame)
     assert len(predictions) == frame.height
     run = json.loads(run_path.read_text(encoding="utf-8"))
     assert run["model"] == model
@@ -163,3 +163,68 @@ def test_invalid_target_raises(
     data = frame if data_change is None else frame.with_columns(data_change)
     with pytest.raises(InputError, match=message):
         optimize_model(data, make_config(**overrides))
+
+
+def test_train_filters_leave_rows_out_of_training_and_statistics(
+    frame: pl.DataFrame, make_config: Callable[..., Config]
+) -> None:
+    """Rows outside ``train_filters`` are neither trained on nor in the statistics, and are counted."""
+    # Rows outside the filters have values far from the others, which would move the statistics.
+    late = frame.with_columns(s0=pl.when(pl.col("t") >= 90).then(pl.col("s0") + 1000.0).otherwise(pl.col("s0")))
+    unlabeled = late.tail(40).with_columns(y=pl.lit(None, dtype=pl.Float64), s0=pl.col("s0") + 100.0)
+    data = pl.concat([late, unlabeled])
+    filters = ({"column": "lot", "op": "ne", "value": "L0"},)
+    train_filters = ({"column": "t", "op": "lt", "value": 90},)
+    result = optimize_model(data, make_config(model="pls", filters=filters, train_filters=train_filters))
+
+    filtered = data.filter(pl.col("lot") != "L0")
+    statistic_rows = filtered.filter(pl.col("t") < 90)
+    run = result.to_dict()
+    assert run["filters"] == list(filters)
+    assert run["train_filters"] == list(train_filters)
+    assert run["data"]["n_rows"] == data.height
+    assert run["data"]["n_rows_filtered_out"] == data.height - filtered.height
+    assert run["data"]["n_rows_train_filtered_out"] == filtered.height - statistic_rows.height
+    assert run["data"]["n_rows_used"] == statistic_rows["y"].is_not_null().sum()
+    assert run["data"]["n_unlabeled_rows_used"] == statistic_rows["y"].is_null().sum()
+    assert run["data"]["n_rows_without_target"] == statistic_rows["y"].is_null().sum()
+    preprocess = result.pipeline.named_steps["preprocess"].estimator
+    s0 = result.columns.candidates.index("s0")
+    assert preprocess.named_steps["impute"].statistics_[s0] == pytest.approx(statistic_rows["s0"].median())
+    assert preprocess.named_steps["scale"].mean_[s0] == pytest.approx(statistic_rows["s0"].mean())
+
+
+def test_columns_of_the_filters_stay_candidates(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+    """A column is not excluded only because a filter uses it."""
+    result = optimize_model(frame, make_config(filters=({"column": "s0", "op": "gt", "value": -1},)))
+    assert "s0" in result.columns.candidates
+
+
+def test_role_column_may_miss_values_in_rows_the_filters_remove(
+    frame: pl.DataFrame, make_config: Callable[..., Config]
+) -> None:
+    """Missing values of ``group_column`` are checked only in the rows left by the filters."""
+    data = frame.with_columns(lot=pl.when(pl.col("t") == 0).then(None).otherwise(pl.col("lot")))
+    config = make_config(cv="group", group_column="lot")
+    with pytest.raises(InputError, match="column 'lot' has missing values"):
+        optimize_model(data, config)
+    filters = ({"column": "lot", "op": "is_not_null"},)
+    assert optimize_model(data, make_config(cv="group", group_column="lot", filters=filters)).data.n_rows_filtered_out == 1
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"filters": ({"column": "missing", "op": "is_null"},)}, r"filters\[0\]: column 'missing' is not in the data"),
+        ({"filters": ({"column": "s0", "op": "gt", "value": "0"},)}, r"filters\[0\]: value '0' does not fit"),
+        ({"train_filters": ({"column": "t", "op": "gt", "value": 1000},)}, "no row is left after applying train_filters"),
+        ({"cv": "timeseries", "time_column": "d"}, "column 'd' is of type Duration"),
+    ],
+)
+def test_invalid_filters_or_unhashable_columns_raise(
+    frame: pl.DataFrame, make_config: Callable[..., Config], overrides: dict, message: str
+) -> None:
+    """Filters that do not fit the data, or a role column the rows cannot be hashed by, raise ``InputError``."""
+    data = frame.with_columns(d=pl.duration(days=pl.col("t")))
+    with pytest.raises(InputError, match=message):
+        optimize_model(data, make_config(exclude_columns=("c", "d"), **overrides))

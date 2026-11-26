@@ -8,6 +8,7 @@ from importlib.metadata import version
 from mloom.config import Config
 from mloom.errors import InputError, MloomError, OptimizationError
 from mloom.optimize import optimize_model
+from mloom.prediction import predict
 from mloom.result import Result
 
 __version__ = version("mloom")
@@ -20,4 +21,5 @@ __all__ = [
     "Result",
     "__version__",
     "optimize_model",
+    "predict",
 ]

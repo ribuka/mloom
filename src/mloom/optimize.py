@@ -13,14 +13,16 @@ import polars as pl
 from sklearn.metrics import get_scorer
 from sklearn.pipeline import Pipeline
 
-from mloom.columns import check_columns, plan_columns
+from mloom.columns import check_columns, check_role_values, plan_columns
 from mloom.config import Config
 from mloom.cv import CVPlan, order_rows, plan_cv
 from mloom.data import Data, load_data
 from mloom.errors import InputError, OptimizationError
+from mloom.filters import apply_filters
 from mloom.metrics import BINARY_ONLY_METRICS
 from mloom.pipeline import as_float, build_pipeline, fit_preprocess, to_matrix
 from mloom.result import DataSummary, Result
+from mloom.row_hash import check_hashable, hash_columns, hash_rows
 from mloom.rows import select_rows
 from mloom.sensors import load_unavailable_sensors
 from mloom.settings import load_settings
@@ -48,7 +50,8 @@ def optimize_model(data: Data, config: Config) -> Result:
     ------
     InputError
         When the data, ``unavailable-sensors.json`` or ``mloom.toml`` is
-        invalid or does not fit the config.
+        invalid or does not fit the config, including the row filters, or no row
+        is left after the filters.
         Raised before any model is fitted.
     OptimizationError
         When no trial of the search finished with a score.
@@ -57,7 +60,11 @@ def optimize_model(data: Data, config: Config) -> Result:
     sensors = load_unavailable_sensors(config.unavailable_sensors)
     settings = load_settings(config.settings)
     check_columns(frame, config, sensors)
-    training = select_rows(frame, config, sensors, use_unlabeled=settings.use_unlabeled_rows)
+    filtered = apply_filters(frame, config.filters, "filters")
+    trainable = apply_filters(filtered, config.train_filters, "train_filters")
+    check_role_values(trainable, config)
+    check_hashable(trainable.schema, [config.target, *config.role_columns])
+    training = select_rows(trainable, config, sensors, use_unlabeled=settings.use_unlabeled_rows)
     rows = order_rows(training.labeled, config)
     y = _target(rows, config)
     columns = plan_columns(rows, training.unlabeled, config, sensors, settings.max_missing_rate)
@@ -81,6 +88,8 @@ def optimize_model(data: Data, config: Config) -> Result:
             path=path,
             n_rows=frame.height,
             n_columns=frame.width,
+            n_rows_filtered_out=frame.height - filtered.height,
+            n_rows_train_filtered_out=filtered.height - trainable.height,
             n_rows_used=rows.height,
             n_unlabeled_rows_used=training.unlabeled.height,
             n_rows_without_target=training.n_without_target,
@@ -96,6 +105,7 @@ def optimize_model(data: Data, config: Config) -> Result:
         cv=cv_plan.describe(config),
         hpo=_describe_search(study, config),
         created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        training_hashes=np.unique(hash_rows(rows, hash_columns(columns.candidates, config))),
     )
 
 
