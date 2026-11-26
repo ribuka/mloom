@@ -13,7 +13,7 @@
 
 - The Python API is the only place that decides which columns are excluded, how models are evaluated, and what is saved.
 - The CLI only turns its arguments into the API's config, calls the API, and saves the result. NEVER put processing logic in the CLI.
-- The Skill (`SKILL.md`) only turns the user's request into CLI arguments and explains the run record (`mloom show`). NEVER make it decide columns, evaluation, or search spaces.
+- The Skill (`SKILL.md`) turns the user's request into CLI arguments and explains the run record (`mloom show`) and the predictions. From the meaning of the columns, it may suggest, with reasons, columns suspected of leaking or of being unavailable at prediction time, but it passes only the columns the user chooses. NEVER make it decide columns, evaluation, or search spaces.
 
 ## Working tree
 
