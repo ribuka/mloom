@@ -402,6 +402,14 @@ n_neighbors = 5
 
 - `RandomForestRegressor`・`RandomForestClassifier` は、欠損を含む X で fit・predict できる（2026-11-26 scikit-learn 1.9.1 で確認。2000 行・8 列、20% を NaN にしたデータで、例外なく予測値が返った）。そのため `random_forest` の `auto` は `none` のまま。
 - 学習時に欠損が無かった列に、予測時だけ欠損が来たとき、LightGBM は欠損を 0 とみなして分割する（2026-11-26 lightgbm 4.7.0 で確認。欠損の無いデータで 1 回だけ分割する木を作ると、その分割の `missing_type` が `None` で、その列を NaN にした行と 0 にした行の予測が一致した）。mloom の処理は変えない。
+- 記録の `preprocessing.impute.method` に、最終モデルが実際に使った補完の方式（`auto` をモデルごとの方式に読み替えた後の値。`Preprocessing.impute`）を残す（2026-11-26、Issue #12）。値は `none`、`median`、`mean`、`most_frequent`、`constant`、`knn`、`iterative` のどれかで、`auto` にはならない。`auto` 以外を設定したときは設定と同じ値。
+  - `settings.impute.method` は、設定に書いた値（`auto` を含む）のまま残す。`settings` は設定を、`preprocessing` は最終モデルが実際に使った前処理を残す場所で、`preprocessing.clip` と同じ分け方にするため。モデル名と上の表を突き合わせなくても、どの方式で学習したかを記録だけで読み取れる。
+  - `fill_value`・`n_neighbors` は `preprocessing.impute` に入れない。設定の値をそのまま使っていて、すでに `settings.impute` にあるため。補完の統計量（中央値など）も入れない。記録が大きくなるため。CV の分割ごとの方式も書かない。どの分割でも同じ方式を使うため。
+
+```json
+{"method": "median"}
+```
+
 - `IterativeImputer` は、作るときは `sklearn.experimental.enable_iterative_imputer` の import が要るが、pickle を読む側では要らない（2026-11-26 scikit-learn 1.9.1 で確認）。
 
 ### 特徴量選択
@@ -650,6 +658,8 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
   - `preprocessing.clip` に、最終モデルのクリップの方式・上下限・クリップしなかった列を足した。
   - `versions.lightgbm` をなくした（Issue #20 で戻した）。
 
+- `preprocessing.impute` に、最終モデルが実際に使った補完の方式（`auto` を読み替えた後の値）を足した（2026-11-26、Issue #12。「前処理」）。
+
 ```json
 {
   "mloom_version": "0.1.0",
@@ -691,7 +701,8 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
     ]
   },
   "preprocessing": {
-    "clip": {"method": "iqr", "bounds": {"TI-102": [-3.1, 3.2]}, "unclipped_columns": ["PI-900"]}
+    "clip": {"method": "iqr", "bounds": {"TI-102": [-3.1, 3.2]}, "unclipped_columns": ["PI-900"]},
+    "impute": {"method": "median"}
   },
   "excluded_columns": [
     {"name": "timestamp", "reason": "role", "detail": null},

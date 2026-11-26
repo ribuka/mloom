@@ -114,6 +114,7 @@ def optimize_model(data: Data, config: Config) -> Result:
         sensors=sensors,
         settings=settings,
         clip=describe_clip(settings.clip.method, fitted_clip_bounds(preprocess), columns.candidates),
+        impute={"method": preprocessing.impute},
         columns=columns,
         selected_columns=[columns.candidates[i] for i in keep],
         best_params=best.params,

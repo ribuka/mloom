@@ -105,7 +105,7 @@ Read that output and report, in the user's language:
   - Counted on the rows left after both filters: `n_rows_used` for training, `n_unlabeled_rows_used` (rows without a target used only for the statistics of preprocessing), `n_rows_without_target`, and `n_rows_with_infinite_target` (rows dropped because the target is +inf or -inf).
   - `infinite_by_column` when it is not empty: infinite values of the inputs are treated as missing, in training and in prediction. A column with many of them may be worth excluding.
 - `filters` and `train_filters` as they were passed, when they are not empty.
-- The settings: `settings.columns`, `settings.preprocessing`, `settings.clip` and `settings.impute` with `settings.sources` (the file each value came from) and `settings.files` (the files read, with `found`). For clipping, also `preprocessing.clip`: the method, the lower and upper bounds of each column (`bounds`) and the columns not clipped (`unclipped_columns`).
+- The settings: `settings.columns`, `settings.preprocessing`, `settings.clip` and `settings.impute` with `settings.sources` (the file each value came from) and `settings.files` (the files read, with `found`). For clipping, also `preprocessing.clip`: the method, the lower and upper bounds of each column (`bounds`) and the columns not clipped (`unclipped_columns`). For imputation, also `preprocessing.impute.method`: the method the final model used, with `auto` resolved for the model (`settings.impute.method` keeps the value as set, `auto` included).
 - `best_params`, and `hpo.n_trials_failed` when it is not 0.
 - Where `model.pkl` is, and that `mloom predict` predicts with it (section 6). Warn that a pickle must only be loaded from a trusted source.
 

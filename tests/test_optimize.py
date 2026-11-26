@@ -255,18 +255,18 @@ def with_missing(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 @pytest.mark.parametrize(
-    ("method", "model", "imputed"),
+    ("method", "model", "resolved"),
     [
-        ("auto", "ridge", True),
-        ("auto", "lightgbm", False),
-        ("auto", "random_forest", False),
-        ("none", "lightgbm", False),
-        ("median", "ridge", True),
-        ("mean", "lightgbm", True),
-        ("most_frequent", "ridge", True),
-        ("constant", "lightgbm", True),
-        ("knn", "ridge", True),
-        ("iterative", "lightgbm", True),
+        ("auto", "ridge", "median"),
+        ("auto", "lightgbm", "none"),
+        ("auto", "random_forest", "none"),
+        ("none", "lightgbm", "none"),
+        ("median", "ridge", "median"),
+        ("mean", "lightgbm", "mean"),
+        ("most_frequent", "ridge", "most_frequent"),
+        ("constant", "lightgbm", "constant"),
+        ("knn", "ridge", "knn"),
+        ("iterative", "lightgbm", "iterative"),
     ],
 )
 def test_each_imputation_fits_and_predicts(
@@ -275,18 +275,21 @@ def test_each_imputation_fits_and_predicts(
     tmp_path: Path,
     method: str,
     model: str,
-    imputed: bool,
+    resolved: str,
 ) -> None:
     """Every ``[impute] method`` trains on data with missing values and +-inf, and predicts every row.
 
-    By default (``auto``), the models that handle missing values get no imputation step.
+    By default (``auto``), the models that handle missing values get no imputation step. The record keeps the
+    method as set in ``settings.impute`` and the method the final model used in ``preprocessing.impute``.
     """
     settings = _settings(tmp_path, f"[impute]\nmethod = '{method}'\n")
     result = optimize_model(with_missing, make_config(model=model, settings=settings))
     preprocess = result.pipeline.named_steps["preprocess"].estimator
-    assert ("impute" in preprocess.named_steps) is imputed
+    assert ("impute" in preprocess.named_steps) is (resolved != "none")
     assert np.isfinite(result.pipeline.predict(with_missing)).all()
-    assert result.to_dict()["settings"]["impute"]["method"] == method
+    run = result.to_dict()
+    assert run["settings"]["impute"]["method"] == method
+    assert run["preprocessing"]["impute"] == {"method": resolved}
 
 
 def test_clipping_is_recorded_in_run_json(frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path) -> None:
