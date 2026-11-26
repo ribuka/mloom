@@ -5,7 +5,40 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、使え
 - Python API が本体です。エージェントは同梱の Skill（[skills/model-optimization/SKILL.md](skills/model-optimization/SKILL.md)）から薄い CLI を通して使います。
 - 仕様と未決事項は [docs/spec.md](docs/spec.md) にあります。現在はたたき台（v0.1.0）です。
 
+## 導入
+
+mloom は PC に 1 つ clone し、Skill はジャンクションで各エージェントに見せます。利用側リポジトリには mloom を入れません。
+
+1. 利用側リポジトリとは別の場所に clone します（例: `C:\Users\<you>\repos\mloom`。以下 `<clone>`）。
+2. clone で `uv sync` を実行します。
+3. 各エージェントの既定の Skill の置き場所に、`<clone>\skills\model-optimization` を指すジャンクションを作ります。
+
+   ```powershell
+   # Claude Code（~/.claude/skills/<名前>/SKILL.md を読む）
+   New-Item -ItemType Directory -Force "$HOME\.claude\skills" | Out-Null
+   New-Item -ItemType Junction -Path "$HOME\.claude\skills\model-optimization" -Target "<clone>\skills\model-optimization"
+   # Codex（~/.agents/skills の下の SKILL.md を読む）
+   New-Item -ItemType Directory -Force "$HOME\.agents\skills" | Out-Null
+   New-Item -ItemType Junction -Path "$HOME\.agents\skills\model-optimization" -Target "<clone>\skills\model-optimization"
+   ```
+
+   - 置き場所は、[Claude Code のドキュメント](https://code.claude.com/docs/en/skills)と [Codex のドキュメント](https://developers.openai.com/codex/skills)（2026-11-26 時点で https://learn.chatgpt.com/docs/build-skills に転送）、それにこの手順で作ったジャンクションが読まれることで確かめました（[docs/spec.md](docs/spec.md) の「配布と実行」）。
+   - Skill は、ジャンクションの実際のパスから `<clone>` を求め、利用側リポジトリの直下で `uv run --project "<clone>" mloom ...` を実行します。
+4. 更新は、clone で `git pull` と `uv sync` を実行するだけです。ジャンクションの先が変わるので、Skill も mloom と同じ版になります。
+5. 利用側リポジトリには mloom を入れません（`uv add mloom` などをしない）。`config/mloom.toml`・`config/unavailable-sensors.json`・データ・出力先は、利用側リポジトリに置きます。
+
+ジャンクションを消すときは、`(Get-Item "$HOME\.claude\skills\model-optimization").Delete()` のように、ジャンクションだけを消します（`Remove-Item -Recurse` は先のファイルまで消すことがあります）。
+
 ## 試し方
+
+利用側リポジトリの直下から、clone の mloom で実行します（データ・`config/`・出力先は利用側リポジトリからの相対パス）。
+
+```powershell
+uv run --project "<clone>" "<clone>\examples\make_sample_data.py"
+uv run --project "<clone>" mloom optimize data/sample.parquet --target quality --task regression --model hist_gradient_boosting --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors "<clone>\examples\unavailable-sensors.json" --n-trials 20 --output outputs/quality-hgb
+```
+
+mloom の clone の中で試すだけなら、`--project` は要りません。
 
 ```powershell
 uv sync
