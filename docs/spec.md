@@ -88,7 +88,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | `group_column` | `cv` が `group` のとき ○ | なし | グループの列（ロット、バッチなど）。説明変数からは外す |
 | `metric` | | `task` ごとの既定 | 評価指標。回帰は `rmse`（既定）、`mae`、`r2`。分類は `log_loss`（既定）、`accuracy`、`f1_macro`、`roc_auc`（2 値のみ） |
 | `exclude_columns` | | `[]` | 説明変数から外す列（ID 列など） |
-| `filters` | | `[]` | 行のフィルタの条件（下の「行のフィルタ」。未実装）。CLI での渡し方は未決 19 |
+| `filters` | | `[]` | 行のフィルタの条件（下の「行のフィルタ」。未実装）。CLI では、条件を書いた JSON ファイルのパスを `--filters` で渡す（2026-11-26 ユーザー判断。未決 19）。ファイルの中身は、`run.json` と `model.pkl` の `filters` と同じ形 |
 | `unavailable_sensors` | | `config/unavailable-sensors.json` | 使えないセンサの定義ファイル。カレントディレクトリからの相対パス |
 | `settings` | | `config/mloom.toml` | 利用側の設定ファイル（下の「設定ファイル」）。カレントディレクトリからの相対パス。`None` なら mloom 側の既定値だけを読む |
 | `n_trials` | | 100 | HPO の試行数 |
@@ -426,6 +426,7 @@ n_neighbors = 5
 {
     "pipeline": Pipeline,   # 列の選択 → 前処理 → 特徴量選択 → 推定器
     "filters": [...],       # 「行のフィルタ」の定義。run.json の filters と同じ
+    "training_rows": {...}, # 学習に使った行の照合用（「予測」）。照合に使う列と、行ごとのハッシュ
 }
 ```
 
@@ -438,7 +439,38 @@ n_neighbors = 5
 - 処理: `model.pkl` を読み、フィルタを適用し、条件を満たす行だけを予測し、満たさない行は NaN にして、入力と同じ行数・同じ順で返す。
 - 説明変数の無限大は Pipeline の中で欠損になるので、予測の入口では特別に扱わない（「行の除外」）。
 - この入口を使う環境には mloom が要る。`model.pkl` 自体は mloom なしでも読める。
-- 出力の形（ID 列や時刻の列を一緒に出すか、分類で確率を出すか、フィルタの判定の列を出すか）は未決 20。
+
+出力の列（2026-11-26 ユーザー判断。未決 20。列の名前は案）:
+
+| 列 | 内容 | 出す条件 |
+| --- | --- | --- |
+| `prediction` | 予測値。フィルタの条件を満たさない行は NaN（分類では null） | 常に |
+| `--keep-columns` で指定した列 | 入力の列をそのまま出す（例: `timestamp`、`lot`）。予測と元の行を結び付けるため | 指定したとき |
+| `passed_filter` | フィルタの条件を満たしたか（bool）。予測値が NaN の理由が、フィルタの外だからかどうかを見分けるため | 常に |
+| `used_for_training` | 最終モデルの学習に使った行か（bool） | 常に |
+| `proba_<クラス>` | 分類のクラスごとの確率（`predict_proba`） | 分類のとき |
+| `shap_<列名>`、`shap_base` | 採用した列（`selected_columns`）ごとの SHAP 寄与と、基準値 | `--shap` を付けたとき |
+
+学習に使った行の判定（`used_for_training`。2026-11-26 ユーザー判断）:
+
+- 対象は、最終モデルの学習に使った行だけ。フィルタを通り、目的変数があり、目的変数が無限大でない行。補完・標準化の統計量にだけ使った行（目的変数が欠損した行）は false。
+- 予測する表とは、行の値で照合する。学習時に、候補列の値（`time_column`・`group_column` の指定があれば、その値も）を行ごとにハッシュにして、`model.pkl` の `training_rows` に保存する。予測時は同じ列で同じハッシュを作り、一致すれば true にする。
+  - ユーザーが照合用の列を指定しなくて済む。値が後から直された行は、学習に使っていないと判定される。
+  - 照合に使う列が予測する表に無いときは、エラーで止める（終了コード 2。案）。
+  - ハッシュは、polars の `hash_rows` を使わずに作る（案）。`hash_rows` は polars の版をまたいで同じ値になることが保証されず、mloom の版を上げると古い `model.pkl` と照合できなくなるため。
+
+SHAP の寄与（2026-11-26 ユーザー判断）:
+
+- `--shap` を付けたときだけ出す。計算に時間がかかることがあり、列も説明変数の数だけ増えるため。
+- shap パッケージを、mloom の通常の依存にする。使うのは `mloom predict` の側だけで、`model.pkl` の依存は増えない。
+- `hist_gradient_boosting`・`random_forest` は `shap.TreeExplainer`、`ridge`・`pls` は線形の SHAP（特徴量の独立を仮定）で計算する（案）。
+- 2026-11-26 に shap 0.54.1・scikit-learn 1.9.1・numpy 2.5.5 で確かめたこと（欠損が 10% のデータ）:
+  - `TreeExplainer` は、`HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`・`RandomForestRegressor` で動いた。
+  - 基準値と寄与の合計は、予測値（分類は `decision_function` の対数オッズ）と、1e-13 程度の誤差で一致した。
+  - 1000 行にかかった時間は、`HistGradientBoosting` が約 1.5 秒、`RandomForest`（木 100 本、深さの制限なし）が約 52 秒。
+- 列は、採用した列ごとの `shap_<列名>` と、基準値の `shap_base`。採用されなかった列は、寄与が常に 0 なので出さない。
+- 分類の寄与の単位は、モデルによって違う（対数オッズか確率か）。多値分類では、クラスごとに列を出す（`shap_<クラス>_<列名>`）。
+- フィルタの外の行は、SHAP の列も NaN にする。
 
 ### `run.json`
 
@@ -536,10 +568,16 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 - CLI は引数を `Config` に変換し、`optimize_model` と `result.save` を呼ぶだけにする。
 - 標準出力の最後に `run.json` のパスを出す。進捗やログは標準エラーに出す。
 
-予測（未実装。引数と出力の形は案。未決 20）:
+フィルタ（未実装。未決 19）:
 
 ```powershell
-uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/ridge/predictions.parquet
+uv run mloom optimize data/train.parquet ... --filters config/filters.json
+```
+
+予測（未実装。引数の名前は案。出力の列は「予測」）:
+
+```powershell
+uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/ridge/predictions.parquet [--keep-columns timestamp,lot] [--shap]
 ```
 
 - CLI は Python API の予測を呼んで、結果を Parquet に保存するだけにする。
@@ -587,6 +625,7 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | Pipeline、CV、特徴量選択、モデル | scikit-learn |
 | HPO | optuna |
 | LightGBM（追加の依存。`hist_gradient_boosting` への置き換えでなくす。未実装） | lightgbm |
+| 予測時の SHAP の寄与（未実装） | shap |
 | パッケージ管理 | uv |
 | lint、型チェック、テスト | ruff、ty、pytest |
 
@@ -634,8 +673,8 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | 16 | pickle の読み込みに mloom が要る | **決定**（2026-11-26）: mloom への依存をなくし、`ColumnTransformer` で列を選ぶ。→「`model.pkl`」 |
 | 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、`run.json` と標準エラーに警告を出すか |
 | 18 | 予測時の無限大 | **決定**（2026-11-26）: 説明変数の無限大は、学習時も予測時も欠損とみなす。→「行の除外」 |
-| 19 | フィルタの渡し方 | API は `Config.filters` に条件のリストを渡す。CLI では、JSON ファイルのパスを渡すか（`--filters filters.json`）、条件を 1 つずつ引数で渡すか（`--filter "FI-101 gt 0"`）。利用側の設定ファイルに書く形も考えられる |
-| 20 | 予測の出力の形 | `mloom predict` の出力に、予測値のほかに何を出すか（入力の ID 列や時刻の列、分類のクラスごとの確率、フィルタの条件を満たしたかどうか） |
+| 19 | フィルタの渡し方 | **決定**（2026-11-26）: API は `Config.filters` に条件のリストを渡す。CLI では、JSON ファイルのパスを `--filters` で渡す。→「設定」 |
+| 20 | 予測の出力の形 | **決定**（2026-11-26）: 予測値に加えて、指定した入力の列、フィルタの判定、学習に使った行か、分類の確率、`--shap` を付けたときの SHAP の寄与を出す。→「予測」 |
 
 ## 完了条件（v0.1、案）
 
@@ -652,6 +691,8 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 
 - mloom が無い環境で `model.pkl` を `pickle.load` し、README の手順で予測できる。
 - `mloom predict` で予測すると、入力と同じ行数・同じ順で予測が返り、フィルタの条件を満たさない行は NaN になる。
+- 学習に使った表をそのまま `mloom predict` に渡すと、最終モデルの学習に使った行だけで `used_for_training` が true になる。
+- `--shap` を付けると、行ごとに `shap_base` と SHAP の寄与の合計が予測値（分類は対数オッズか確率）と一致する。
 - 説明変数に無限大がある行も、学習から外されず、予測でも値が返る。
 - クリップと補完のそれぞれの方式で、学習と予測ができる。
 - 上の 4 つのモデルは、`lightgbm` を `hist_gradient_boosting` に置き換えたもので確かめる。
