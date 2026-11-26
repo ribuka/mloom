@@ -25,19 +25,19 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | リポジトリ | 既存の `agent-skills` とは別のリポジトリ（本リポジトリ）にする | 決定論的な Python コードとその依存を持つため、汎用 Skill 集とは分ける |
 | ライブラリ | Optuna ＋ scikit-learn | ユーザーがモデルを指定する前提なので、特徴量選択・CV・HPO を mloom 側でつなぐ。AutoML ライブラリにモデル選択まで任せる必要はない |
 | モデル | 実行ごとにユーザーが選ぶ（例: `ridge`、`pls`、`hist_gradient_boosting`、`random_forest`）。1 つのモデルに固定しない | 対象データごとに適したモデルが違うため |
-| 勾配ブースティング | LightGBM をやめ、scikit-learn の `HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`（`hist_gradient_boosting`）に置き換える（2026-11-26 ユーザー判断、未実装） | `model.pkl` を読む環境に lightgbm を要らなくするため。同じヒストグラム型の勾配ブースティングで、欠損をそのまま扱える。結果は LightGBM と一致しない（サンプルデータの時系列 5 分割で、既定値の RMSE は LightGBM 3.450、HistGradientBoosting 3.487）。行のサブサンプリング（LightGBM の `subsample`）は無い |
+| 勾配ブースティング | LightGBM をやめ、scikit-learn の `HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`（`hist_gradient_boosting`）に置き換える（2026-11-26 ユーザー判断。2026-11-26 に実装） | `model.pkl` を読む環境に lightgbm を要らなくするため。同じヒストグラム型の勾配ブースティングで、欠損をそのまま扱える。結果は LightGBM と一致しない（サンプルデータの時系列 5 分割で、既定値の RMSE は LightGBM 3.450、HistGradientBoosting 3.487）。行のサブサンプリング（LightGBM の `subsample`）は無い |
 | 出力 | 学習済みの Pipeline 全体と行のフィルタの定義を `model.pkl` に、実行の記録を `run.json` に保存する | モデル本体だけを保存すると、予測する側で列の選択や欠損補完を再現する必要がある。Pipeline ごと保存すれば同じ処理を通せる |
 | `model.pkl` の依存 | `model.pkl` は mloom が無い環境でも読めるようにする。Pipeline には scikit-learn・numpy などの部品と関数だけを入れ、mloom のクラスや関数を入れない（2026-11-26 ユーザー判断。未決 16） | 予測する環境に mloom を入れなくて済むようにするため |
 | 予測の入口 | `pickle.load` に加えて、`mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 ユーザー判断。未決 10。スコア・混同行列・SHAP は未実装） | フィルタの適用と、フィルタの外の行を NaN にする処理を 1 か所にまとめ、Skill から予測まで実行できるようにするため |
 | 行のフィルタ | 列と値の条件で、学習と予測に使う行を絞れる。条件は AND だけで、定義を `model.pkl` と `run.json` に残す（2026-11-26 ユーザー判断。「行のフィルタ」） | 運転条件などで、モデルを使う範囲を決めるため |
-| 前処理の方式 | 説明変数のクリップと補完の方式を、設定ファイルで選べる（2026-11-26 ユーザー判断、未実装。「前処理」） | データによって適した前処理が違うため |
+| 前処理の方式 | 説明変数のクリップと補完の方式を、設定ファイルで選べる（2026-11-26 ユーザー判断。2026-11-26 に実装。「前処理」） | データによって適した前処理が違うため |
 | 本体の形 | 処理の本体は決定論的な Python コードにする。Skill は「ユーザーの指定を CLI の引数に変換し、結果を説明する」だけにする | どの列を除外するか、どう評価するか、何を保存するかを、実行のたびに変わらないようにするため |
 | 入口 | **Python API が本体**。Skill 向けに薄い CLI を用意する。CLI は Python API を呼ぶだけにする | 人は Notebook や既存コードから API で使い、エージェントは設定を渡して 1 回実行し、終了コードと `run.json` で結果を確かめる。センサ除外・特徴量選択・HPO の実装は 1 か所に置く |
 | API の形 | `optimize_model(data, config)` が学習済み Pipeline と評価結果を返し、`result.save(output_dir)` で `model.pkl` と `run.json` を保存する | 同上 |
 | データの渡し方 | API には Parquet のパス、または Polars の DataFrame を渡せる。CLI には Parquet のパスを渡す | 同上 |
-| 無限大 | 説明変数の +inf・-inf は、学習時も予測時も欠損とみなす。目的変数に +inf・-inf がある行は、学習から外す（2026-11-26 ユーザー判断で、「説明変数に無限大がある行は行ごと外す」から変更。未実装。未決 18） | 予測時は行ごとに値を返すので行を外せず、学習時だけ行を外すと、学習と予測で扱いが食い違うため。プロセスデータの無限大は、ゼロ除算やヒストリアンのエラー値など「値が正しく取れていない」ことが多く、欠損として扱うのが一般的。無限大が多い列は欠損率のしきい値で除外される |
+| 無限大 | 説明変数の +inf・-inf は、学習時も予測時も欠損とみなす。目的変数に +inf・-inf がある行は、学習から外す（2026-11-26 ユーザー判断で、「説明変数に無限大がある行は行ごと外す」から変更。2026-11-26 に実装。未決 18） | 予測時は行ごとに値を返すので行を外せず、学習時だけ行を外すと、学習と予測で扱いが食い違うため。プロセスデータの無限大は、ゼロ除算やヒストリアンのエラー値など「値が正しく取れていない」ことが多く、欠損として扱うのが一般的。無限大が多い列は欠損率のしきい値で除外される |
 | 欠損率のしきい値 | 説明変数を除外する欠損率のしきい値を、利用側リポジトリの `config/mloom.toml` で変えられる（2026-11-26 ユーザー判断。「設定ファイル」） | データによって適したしきい値が違うため |
-| 目的変数が欠損した行 | 説明変数だけから計算する統計量（補完の中央値、標準化の平均・標準偏差）に、目的変数が欠損した行も使う。欠損率は「目的変数がある行」と「全行」の両方で見て、どちらかがしきい値を超えたら除外する。`config/mloom.toml` で使わないようにも切り替えられる（既定は使う）（2026-11-26 ユーザー判断） | ソフトセンサのように分析値がまばらなデータでは、統計量が安定するため。欠損率は、学習で実際の値から学べる量（目的変数がある行）と、予測時に補完に頼る量（全行）の両方を満たす列だけを残すため。非定常運転などで使いたくないデータもあるので切り替えられるようにする |
+| 目的変数が欠損した行 | 説明変数だけから計算する統計量（クリップの上下限、補完の値、標準化の平均・標準偏差）に、目的変数が欠損した行も使う。欠損率は「目的変数がある行」と「全行」の両方で見て、どちらかがしきい値を超えたら除外する。`config/mloom.toml` で使わないようにも切り替えられる（既定は使う）（2026-11-26 ユーザー判断） | ソフトセンサのように分析値がまばらなデータでは、統計量が安定するため。欠損率は、学習で実際の値から学べる量（目的変数がある行）と、予測時に補完に頼る量（全行）の両方を満たす列だけを残すため。非定常運転などで使いたくないデータもあるので切り替えられるようにする |
 
 ### スコープ外
 
@@ -142,42 +142,42 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 - 2 は、その PC だけの既定値（例: 扱うデータの傾向に合わせたしきい値）を、利用側の各リポジトリに書かずに変えるためのもの。
 - `config/unavailable-sensors.json` は名前を変えない。中身は mloom の設定ではなくプラントの事実で、他の分析やツールからも読めるように汎用の名前にしておく。
 
-キー（3 のファイルの内容）:
+キー（3 のファイルの内容。`[clip]`・`[impute]` は 2026-11-26 に実装。意味は「前処理」）:
 
 ```toml
 [columns]
-# 欠損率がこの値を超える説明変数を除外する（high_missing）。0 〜 1。既定 0.5
+# 欠損率がこの値を超える説明変数を除外する（high_missing）。+inf・-inf も欠損として数える。0 〜 1。既定 0.5
 max_missing_rate = 0.5
 
 [preprocessing]
-# 目的変数が欠損した行を、欠損率と、補完・標準化の統計量に使うか。既定 true
+# 目的変数が欠損した行を、欠損率と、クリップ・補完・標準化の統計量に使うか。既定 true
 use_unlabeled_rows = true
-```
 
-追加するキー（2026-11-26 決定、未実装。キーの名前と既定値は案。意味は「前処理」）:
-
-```toml
 [clip]
 # none、quantile、iqr、mad、sigma。既定 none
 method = "none"
-# quantile の下側と上側の分位点。既定 0.01 と 0.99
+# quantile の下側と上側の分位点。0 <= lower_quantile < upper_quantile <= 1。既定 0.01 と 0.99
 lower_quantile = 0.01
 upper_quantile = 0.99
-# iqr の k（Q1 - k·IQR 〜 Q3 + k·IQR）。既定 1.5
+# iqr の k（Q1 - k·IQR 〜 Q3 + k·IQR）。正の数。既定 1.5
 iqr_k = 1.5
-# mad の k（中央値 ± k × 1.4826 × MAD）。既定 3.0
+# mad の k（中央値 ± k × 1.4826 × MAD）。正の数。既定 3.0
 mad_k = 3.0
-# sigma の k（平均 ± k·σ）。既定 3.0
+# sigma の k（平均 ± k·σ。σ は母標準偏差）。正の数。既定 3.0
 sigma_k = 3.0
 
 [impute]
 # auto、none、median、mean、most_frequent、constant、knn、iterative。既定 auto（モデルごとの既定）
 method = "auto"
-# constant で埋める値。既定 0.0
+# constant で埋める値。有限の数値。既定 0.0
 fill_value = 0.0
-# knn の近傍の数。既定 5
+# knn の近傍の数。1 以上の整数。既定 5
 n_neighbors = 5
 ```
+
+- キーは「表とキーの名前の組」で区別する（2026-11-26 実装で決定）。`[clip] method` と `[impute] method` は別のキーで、ファイルごとの優先順位もキーごとに決まる。
+- `lower_quantile < upper_quantile` は、1 つのファイルの中で両方が書かれていれば、そのファイルで確かめる。加えて、キーごとに併合した後の値でも確かめる（2026-11-26 実装で決定）。片方だけを書くファイルがあると、併合した後に初めて食い違うため（例: 利用側で `lower_quantile = 0.995` だけを書く）。
+- `fill_value` は有限の数値に限る（2026-11-26 実装で決定）。TOML は `nan`・`inf` を書けるが、`nan` で埋めると補完にならないため。
 
 | 状況 | 扱い |
 | --- | --- |
@@ -185,7 +185,7 @@ n_neighbors = 5
 | キーが無い | 次のファイルを探す |
 | どのファイルでも、TOML として読めない、知らない表やキーがある、値が範囲外 | エラーで止める（終了コード 2）。打ち間違いで黙って既定値になるのを防ぐため |
 
-- 使った値と、各キーを読んだファイルを `run.json` の `settings` に残す（`sources`）。
+- 使った値と、各キーを読んだファイルを `run.json` の `settings` に残す（`sources`）。値も `sources` も、TOML と同じく表ごとに入れ子にする（2026-11-26 実装で決定。`settings.columns.max_missing_rate`、`settings.sources.clip.method` など）。`[clip] method` と `[impute] method` のように、表が違えば同じ名前のキーがあるため。
 
 ## 処理の流れ
 
@@ -199,9 +199,9 @@ n_neighbors = 5
 
 評価側のデータの情報が学習に漏れないように、次のように fit する。
 
-- 特徴量選択とモデル（目的変数を使う）は Pipeline の中に置き、CV の分割ごとに、学習側の目的変数がある行だけで fit する。特徴量選択のランク付けは Pipeline の外に移す（「特徴量選択」。未実装）が、学習側の目的変数がある行だけで計算するのは変わらない。
-- 補完と標準化（目的変数を使わない）は、CV の分割ごとに「学習側の目的変数がある行」と「学習側に当たる目的変数が欠損した行」（「CV」）で先に fit して固定し（scikit-learn の `FrozenEstimator`）、Pipeline に入れる。試行ごとには fit し直さない。クリップの上下限も同じ行で先に計算する（「前処理」。未実装）。
-- 最終モデルの補完と標準化は、目的変数がある行と、目的変数が欠損した行のすべてで fit する。
+- 特徴量選択のランク付けとモデル（目的変数を使う）は、CV の分割ごとに、学習側の目的変数がある行だけで計算・fit する。ランク付けは Pipeline の外で、分割ごとに 1 回だけ行う（「特徴量選択」）。モデルは Pipeline の中で fit する。
+- クリップの上下限と、補完・標準化（目的変数を使わない）は、CV の分割ごとに「学習側の目的変数がある行」と「学習側に当たる目的変数が欠損した行」（「CV」）で先に計算・fit して固定し（scikit-learn の `FrozenEstimator`）、Pipeline に入れる。試行ごとには fit し直さない。
+- 最終モデルのクリップ・補完・標準化は、目的変数がある行と、目的変数が欠損した行のすべてで fit する。ランク付けは、目的変数がある行のすべてで行う。
 
 ### 行のフィルタ
 
@@ -275,21 +275,18 @@ n_neighbors = 5
 | 順 | 扱い | `run.json` |
 | --- | --- | --- |
 | 1 | 目的変数が欠損（null、NaN）の行を、学習と評価から外す。`use_unlabeled_rows` が true なら、統計量用の「目的変数が欠損した行」として残し、false なら捨てる | `n_rows_without_target` |
-| 2 | 学習用の行と、残した目的変数が欠損した行のうち、目的変数か、説明変数になりうる列に +inf・-inf がある行を外す（2026-11-26 ユーザー判断） | `n_rows_with_infinite`、列ごとの行数は `infinite_by_column` |
+| 2 | 学習用の行のうち、目的変数が +inf・-inf の行を外す（2026-11-26 ユーザー判断。未決 18） | `n_rows_with_infinite_target`。列ごとの無限大の行数は `infinite_by_column` |
 | 結果 | 学習と評価に使う行、統計量だけに使う目的変数が欠損した行 | `n_rows_used`、`n_unlabeled_rows_used` |
 
-- 「説明変数になりうる列」は、列名で除外される列（目的変数、`time_column`・`group_column`、`exclude_columns`、使えないセンサ）を除いた浮動小数の列。列名で除外される列の無限大では行を外さない。
-- 無限大の判定は、欠損率などで列を除外する前に行う。そのため、あとで `high_missing` などで除外される列の無限大でも行は外れる。無限大が多い列は `infinite_by_column` で見つけ、`exclude_columns` か `unavailable-sensors.json` で外す。
+- 説明変数の +inf・-inf では行を外さず、欠損とみなす（2026-11-26 ユーザー判断で「行ごと外す」から変更。2026-11-26 に実装）。予測時は行を外せない（行ごとに予測を返すため）ので、学習時だけ行を外すと、学習と予測で扱いが食い違うため。
+  - Pipeline の中で、列の選択の直後（クリップより前）に NaN に変える。`FunctionTransformer(np.nan_to_num, kw_args={"nan": np.nan, "posinf": np.nan, "neginf": np.nan})` を使い、mloom の関数を pickle に入れない（2026-11-26 scikit-learn 1.9.1 で確認）。学習時も予測時も同じ処理を通る。
+  - クリップより前に置くのは、無限大がクリップで上下限まで切られて、もっともらしい値として扱われるのを防ぐため。
+  - 列の除外（`all_null`・`constant`・`high_missing`）でも、無限大を欠損として数える（「列の除外」）。
+- `infinite_by_column` は、目的変数と「説明変数になりうる列」の、無限大の行数。学習用の行と残した目的変数が欠損した行で、目的変数が無限大の行を外す前に数える。無限大が出ていた列を後から確かめられるようにするため。
+  - 「説明変数になりうる列」は、列名で除外される列（目的変数、`time_column`・`group_column`、`exclude_columns`、使えないセンサ）を除いた浮動小数の列。列名で除外される列の無限大は数えない。
+  - 無限大が多い列は `infinite_by_column` で見つけられる。欠損率のしきい値で除外されなければ、`exclude_columns` か `unavailable-sensors.json` で外す。
 - 1 行も残らなければエラーで止める（終了コード 2）。
-- 予測時（`model.pkl` の `predict`）は行を外せない（行ごとに予測を返すため）。たたき台の実装では、入力に無限大があると scikit-learn の `ValueError` になる。
-
-変更（2026-11-26 ユーザー判断、未実装。未決 18）: 説明変数の無限大では行を外さず、欠損とみなす。
-
-- 順 2 で行を外すのは、目的変数に +inf・-inf がある行だけにする（キーの名前は案。`n_rows_with_infinite_target`）。
-- 説明変数になりうる列の +inf・-inf は、Pipeline の中で、列の選択の直後（クリップより前）に NaN に変える。`FunctionTransformer(np.nan_to_num, kw_args={"nan": np.nan, "posinf": np.nan, "neginf": np.nan})` を使えば、mloom の関数を pickle に入れずに済む（2026-11-26 scikit-learn 1.9.1 で確認）。学習時も予測時も同じ処理を通る。
-- クリップより前に置くのは、無限大がクリップで上下限まで切られて、もっともらしい値として扱われるのを防ぐため。
-- 欠損率（`high_missing`）は、無限大も欠損として数える。
-- 列ごとの無限大の行数は、今と同じく `infinite_by_column` に残す。無限大が出ていた列を後から確かめられるようにするため。
+- たたき台の実装（2026-11-26 まで）は、目的変数か説明変数になりうる列に無限大がある行を、目的変数が欠損した行も含めて外していた（`n_rows_with_infinite`）。予測時は入力に無限大があると scikit-learn の `ValueError` になっていた。
 
 ### 列の除外
 
@@ -302,15 +299,15 @@ n_neighbors = 5
 | `user_excluded` | `exclude_columns` で指定した列 |
 | `unavailable_sensor` | 使えないセンサ |
 | `non_numeric` | 数値でも真偽値でもない列（案）。真偽値は 0/1 の数値として扱う |
-| `all_null` | すべて欠損の列 |
+| `all_null` | すべて欠損の列（すべて無限大の列も含む） |
 | `constant` | 欠損を除いて値が 1 種類の列 |
 | `high_missing` | 「目的変数がある行での欠損率」か「目的変数が欠損した行も含めた全行での欠損率」のどちらかが、設定ファイルの `max_missing_rate`（既定 0.5）を超える列。`detail` に両方の欠損率を残す |
 
-- 浮動小数の列の NaN は欠損として扱う。
+- 浮動小数の列の NaN と +inf・-inf は欠損として扱う（無限大は 2026-11-26 に実装。Pipeline の中で NaN になるため。「行の除外」）。
 - 欠損率は「行の除外」の後の行で計算する。`use_unlabeled_rows` が false なら、2 つの欠損率は同じになる。
 - `all_null` と `constant` は、目的変数がある行だけで判定する（モデルが学ぶのはこの行だけのため）。
 - 列の除外は CV の前に 1 回だけ行う。時系列の CV でも、欠損率は評価期間を含む全期間で計算する（目的変数を使わないので、ラベルの情報は漏れない）。
-- `high_missing` に当たらない欠損は、Pipeline の中で中央値で補完する（「モデル」）。補完の方式を選べるようにする（「前処理」。未実装）。
+- `high_missing` に当たらない欠損は、Pipeline の中で `[impute] method` の方式で補完するか、補完せずにモデルに渡す（「前処理」）。
 - `time_column`・`group_column` に欠損があれば、分割できないのでエラーで止める（終了コード 2）。
 
 ### CV
@@ -339,7 +336,7 @@ n_neighbors = 5
 
 ### 前処理
 
-決定事項（2026-11-26 ユーザー判断、未実装）:
+決定事項（2026-11-26 ユーザー判断。2026-11-26 に実装、`mloom.pipeline`・`mloom.clip`）:
 
 - Pipeline の前処理の順は、次のとおり。
   1. 列の選択
@@ -350,6 +347,7 @@ n_neighbors = 5
   6. 採用した列の選択（「特徴量選択」）。この後に推定器が続く
 - どの部品も scikit-learn・numpy にあるものだけで組み、mloom のクラスや関数、lambda を入れない（「`model.pkl`」）。
 - クリップの上下限と補完の統計量は、統計量用の行（「処理の流れ」）で先に計算し、固定する。
+- 2〜5 は 1 つの Pipeline（保存する Pipeline の `preprocess` の段。`FrozenEstimator` で固定）にまとめる。段の名前は `infinite`・`clip`・`impute`・`scale` で、使わない段は入れない。
 
 #### クリップ
 
@@ -363,10 +361,19 @@ n_neighbors = 5
 | `mad` | 中央値 ± k × 1.4826 × MAD（k は `mad_k`。既定 3.0） |
 | `sigma` | 平均 ± k·σ（k は `sigma_k`。既定 3.0） |
 
-- 上下限の計算には欠損を使わない。欠損はクリップの後も欠損のまま残る。
-- `FunctionTransformer(np.clip, kw_args={"a_min": 下限の配列, "a_max": 上限の配列})` で実装すれば、mloom の関数を pickle に入れずに済む（2026-11-26 scikit-learn 1.9.1 で確認）。
-- IQR か MAD が 0 の列（ほとんど一定で、ときどきだけ動くセンサなど）は、上下限が 1 点に潰れて値がすべて同じになる。そうした列はクリップせず、`run.json` に残す（案）。
-- 使った方式と、列ごとの上下限、クリップしなかった列を `run.json` に残す（形は案）。
+- 上下限の計算には欠損と無限大を使わない（無限大は先に NaN にしてから `np.nanquantile` などで計算する）。欠損はクリップの後も欠損のまま残る。
+- σ は母標準偏差（`ddof=0`。`np.nanstd` の既定）。
+- `FunctionTransformer(np.clip, kw_args={"a_min": 下限の配列, "a_max": 上限の配列})` で実装し、mloom の関数を pickle に入れない（2026-11-26 scikit-learn 1.9.1 で確認）。
+- 上下限が 1 点に潰れる列はクリップしない。下限を `-inf`、上限を `+inf` にする。`iqr` で IQR が 0、`mad` で MAD が 0、`sigma` で σ が 0 の列（ほとんど一定で、ときどきだけ動くセンサなど）がこれに当たる。そのまま切ると、値がすべて同じになるため。
+  - `quantile` で 2 つの分位点が同じ値になる列も、同じ理由でクリップしない（2026-11-26 実装で決定）。
+  - 統計量用の行に有限の値が 1 つも無い列（CV の分割の学習側でだけすべて欠損の列など）は、上下限が求まらないので、同じくクリップしない（2026-11-26 実装で決定）。
+  - 「1 点に潰れる」は、下限と上限が浮動小数の丸めの範囲（相対 1e-12）で等しいことで判定する。σ は、値がすべて同じでも丸めで 0 にならないことがあるため。
+- `run.json` の `preprocessing.clip` に、最終モデルの値で次の 3 つを残す。CV の分割ごとの値は書かない（`run.json` が大きくなりすぎるため）。
+  - `method`、`bounds`（クリップした列ごとの `[下限, 上限]`）、`unclipped_columns`（上の理由でクリップしなかった列）。`method` が `none` なら `bounds` と `unclipped_columns` は空。
+
+```json
+{"method": "iqr", "bounds": {"TI-102": [-3.1, 3.2]}, "unclipped_columns": ["PI-900"]}
+```
 
 #### 欠損の補完
 
@@ -381,31 +388,35 @@ n_neighbors = 5
 | `knn` | `KNNImputer(n_neighbors=n_neighbors)` |
 | `iterative` | `IterativeImputer(random_state=seed)` |
 
+- どの部品にも `keep_empty_features=True` を付ける。列の数を変えず、採用した列の番号がずれないようにするため。統計量用の行ですべて欠損の列は 0 で埋まる（`constant` は `fill_value`）。
+- `none` を欠損を扱えないモデルで選んだときは、データを読んで設定を確かめた直後、学習を始める前に止める（`mloom.pipeline.plan_preprocessing`）。
+- 欠損を扱えるかどうかと、`auto` の方式は、`mloom.models.ModelSpec` の `handles_missing`・`default_impute` に持つ。
+
 | `model` | `auto` の補完 | 理由 |
 | --- | --- | --- |
 | `ridge`、`pls` | `median` | 欠損を扱えない |
 | `hist_gradient_boosting`、`random_forest` | `none` | 分割のたびに欠損の行を送る側を学習するので、欠損であること自体を情報として使える。中央値で埋めると、欠損の行が「たまたま中央値だった行」と区別できなくなる |
 
-- `random_forest` が欠損をそのまま扱えるのは、scikit-learn 1.4 以降と理解している。実装の前に scikit-learn 1.9.1 で確かめる（未確認）。
-- 学習時に欠損が無かった列に、予測時だけ欠損が来たとき、`HistGradientBoosting` は学習で行が多かったほうの枝に送ると理解している（scikit-learn のドキュメントの記述。未確認）。
+- `RandomForestRegressor`・`RandomForestClassifier` は、欠損を含む X で fit・predict できる（2026-11-26 scikit-learn 1.9.1 で確認。2000 行・8 列、20% を NaN にしたデータで、例外なく予測値が返った）。そのため `random_forest` の `auto` は `none` のまま。
+- 学習時に欠損が無かった列に、予測時だけ欠損が来たとき、`HistGradientBoosting` は、その分割で学習の行が多かったほうの子に送る（2026-11-26 scikit-learn 1.9.1 で確認。欠損の無いデータで 1 回だけ分割する木を作ると、根の `missing_go_to_left` が 0 で、右の子の行数 1050 が左の 950 より多く、その列を NaN にした行の予測が右の子の値と一致した）。mloom の処理は変えない。
 - `IterativeImputer` は、作るときは `sklearn.experimental.enable_iterative_imputer` の import が要るが、pickle を読む側では要らない（2026-11-26 scikit-learn 1.9.1 で確認）。
 
-### 特徴量選択（案）
+### 特徴量選択
 
-- Pipeline の中で、各列を目的変数との関係でランク付けし（回帰は `f_regression`、分類は `f_classif`）、上位 `k` 列を使う（`SelectKBest`）。
+- 各列を目的変数との関係でランク付けし（回帰は `f_regression`、分類は `f_classif`）、上位 `k` 列を使う。
 - `k` は HPO で探索するハイパーパラメータの 1 つにする（1 〜 候補列数、対数スケール）。
-- 最終学習で選ばれた列を「採用した列」として `run.json` に残す。
+- 最終学習で選ばれた列を「採用した列」として `run.json` の `selected_columns` に残す（候補列の順）。`best_params.k` と数が一致する。
 - ランク付けの方法（`mutual_info_regression`、モデルの重要度、相関の高い列の間引きなど）は「未決事項」。
 
-変更（2026-11-26、未実装。案）: 補完しない既定（「前処理」）と両立させるため、`SelectKBest` を Pipeline から外す。
+ランク付けを Pipeline の外で行う（2026-11-26 決定。2026-11-26 に実装、`mloom.selection`）:
 
-- `SelectKBest(f_regression / f_classif)` は NaN を受け付けない。補完しないモデルの前に置くと、欠損を含むデータで fit が `ValueError: Input X contains NaN` になる（2026-11-26 scikit-learn 1.9.1 で確認。クロスレビューの指摘）。
-- ランク付けは Pipeline の外で行う。CV の分割ごとに 1 回だけ、学習側の目的変数がある行で、前処理の後の値（補完しないモデルでは、ランク付けのためだけに中央値で補完した写し）を使って `f_regression` か `f_classif` で計算する。
-- 推定器には、補完していない元の値（欠損を含む）を渡す。
-- 試行ごとの `k` に応じて、その分割の上位 `k` 列を選ぶ。目的変数を使うランク付けは学習側の行だけで行うので、評価側の情報は漏れない。ランクは試行をまたいで使い回す。
-- Pipeline の中では、前処理の後に、`ColumnTransformer([("keep", "passthrough", 採用した列の番号)], remainder="drop")` で列を選ぶだけにする。
-- 2026-11-26 に scikit-learn 1.9.1 で確かめたこと: 列の番号で選ぶ構成は、欠損と無限大を含む polars の表で学習・予測でき、pickle に `mloom` という文字列が含まれなかった。
+- たたき台の実装は、Pipeline の中の `SelectKBest(f_regression / f_classif)` で選んでいた。`SelectKBest` は NaN を受け付けず、補完しないモデルの前に置くと、欠損を含むデータで fit が `ValueError: Input X contains NaN` になる（2026-11-26 scikit-learn 1.9.1 で確認。クロスレビューの指摘）。補完しない既定（「前処理」）と両立させるため、Pipeline から外した。
+- CV の分割ごとに 1 回だけ、学習側の目的変数がある行でランク付けし、試行をまたいで使い回す。最終モデルでは、学習に使う行のすべてで 1 回行う。目的変数を使うランク付けは学習側の行だけで行うので、評価側の情報は漏れない。
+- 使う値は、前処理（2〜5）の出力。出力に欠損が残る場合（補完しない場合）は、その出力を、統計量用の行の前処理の出力の中央値で補完した写しを使う。この写しはランク付けにだけ使い、推定器には補完していない値（欠損を含む）を渡す。
+- NaN のスコア（一定の列など）は、最も低い順位にする。同じスコアの列は、候補列の順で前の列を上にする（結果を決定的にするため）。
+- 試行の `k` に応じて、その分割の上位 `k` 列の番号（候補列の順に並べ直したもの）を、Pipeline の `select` の段の `ColumnTransformer([("keep", "passthrough", 採用した列の番号)], remainder="drop")` に渡す。
 - `KNNImputer` や `IterativeImputer` は、ほかの列の値から補完する。そのため、前処理は候補列のすべてで行い、採用した列はその後で選ぶ。
+- 2026-11-26 に scikit-learn 1.9.1 で確かめたこと: 列の番号で選ぶ構成は、欠損と無限大を含む polars の表で学習・予測でき、pickle に `mloom` という文字列が含まれなかった（`tests/test_predict.py`。クリップ `iqr` と補完 `knn`・`iterative` でも同じ）。
 
 ### HPO（案）
 
@@ -421,20 +432,20 @@ n_neighbors = 5
 
 | `model` | 回帰の推定器 | 分類の推定器 | 前処理 | 探索するパラメータ（案） |
 | --- | --- | --- | --- | --- |
-| `ridge` | `Ridge` | `LogisticRegression`（L2） | 中央値で補完、標準化 | `alpha`: 1e-4 〜 1e3（対数）。分類では `C = 1 / alpha` |
-| `pls` | `PLSRegression`（`scale=False`） | 未対応（指定するとエラー。未決 1） | 中央値で補完、標準化 | `n_components`: 1 〜 min(20, 候補列数)。`k` を超える分は `k` に切り詰める |
-| `random_forest` | `RandomForestRegressor` | `RandomForestClassifier` | 中央値で補完（未実装の変更: 既定は補完しない。「前処理」） | `n_estimators`: 50 〜 300、`max_depth`: 2 〜 32、`min_samples_leaf`: 1 〜 20、`max_features`: 0.1 〜 1.0 |
-| `lightgbm` | `LGBMRegressor` | `LGBMClassifier` | 中央値で補完 | `num_leaves`: 8 〜 256、`learning_rate`: 1e-3 〜 0.3、`n_estimators`: 50 〜 1000、`min_child_samples`: 5 〜 100、`subsample`・`colsample_bytree`: 0.5 〜 1.0、`reg_lambda`: 1e-8 〜 10 |
-| `hist_gradient_boosting`（未実装。`lightgbm` を置き換える） | `HistGradientBoostingRegressor` | `HistGradientBoostingClassifier` | 補完しない（「前処理」） | `learning_rate`: 1e-3 〜 0.3、`max_iter`: 50 〜 1000、`max_leaf_nodes`: 8 〜 256、`min_samples_leaf`: 5 〜 100、`l2_regularization`: 1e-8 〜 10、`max_features`: 0.5 〜 1.0（いずれも案。`lightgbm` の範囲を対応する引数に移した。行のサブサンプリングは無い） |
+| `ridge` | `Ridge` | `LogisticRegression`（L2） | 補完（既定は中央値）、標準化 | `alpha`: 1e-4 〜 1e3（対数）。分類では `C = 1 / alpha` |
+| `pls` | `PLSRegression`（`scale=False`） | 未対応（指定するとエラー。未決 1） | 補完（既定は中央値）、標準化 | `n_components`: 1 〜 min(20, 候補列数)。`k` を超える分は `k` に切り詰める |
+| `random_forest` | `RandomForestRegressor` | `RandomForestClassifier` | 既定は補完しない（「前処理」） | `n_estimators`: 50 〜 300、`max_depth`: 2 〜 32、`min_samples_leaf`: 1 〜 20、`max_features`: 0.1 〜 1.0 |
+| `hist_gradient_boosting`（2026-11-26 に実装。`lightgbm` を置き換えた） | `HistGradientBoostingRegressor` | `HistGradientBoostingClassifier` | 既定は補完しない（「前処理」） | `learning_rate`: 1e-3 〜 0.3（対数）、`max_iter`: 50 〜 1000（整数、対数）、`max_leaf_nodes`: 8 〜 256（整数、対数）、`min_samples_leaf`: 5 〜 100（整数、対数）、`l2_regularization`: 1e-8 〜 10（対数）、`max_features`: 0.5 〜 1.0（`lightgbm` の範囲を対応する引数に移した。行のサブサンプリングは無い） |
 
 - 探索範囲の正は `mloom.models`。上の表は 2026-11-26 のたたき台の実装の値。
 - 再現性のため、モデルの `n_jobs` は 1 に固定し、`random_state` に `seed` を渡す。
-  - `HistGradientBoosting` には `n_jobs` が無く、OpenMP で全コアを使う。スレッド数が結果を変えないかは、実装の前に確かめる（未決 14）。
+  - `HistGradientBoosting` には `n_jobs` が無く、OpenMP で全コアを使う。スレッド数は結果を変えないので、固定しない（2026-11-26 scikit-learn 1.9.1 で確認。同じ seed で `threadpoolctl.threadpool_limits` を 1 と 4 にして、2000 行・8 列・20% 欠損のデータで回帰・分類の予測値（分類は確率）が完全に一致した。20000 行・30 列で 1・4・12 スレッドでも一致した）。
+  - `hist_gradient_boosting` は `early_stopping=False`、`random_state=seed` に固定する。
 
-- Pipeline の構成: 入力列の選択 → 前処理（欠損の補完 →（標準化）。fit 済みで固定）→ 特徴量選択 → 推定器。前処理の fit に使う行は「処理の流れ」。前処理を足す変更は「前処理」（未実装）。
+- Pipeline の構成: 入力列の選択 → 前処理（無限大を NaN に → クリップ → 補完 →（標準化）。fit 済みで固定）→ 採用した列の選択 → 推定器。前処理の fit に使う行は「処理の流れ」、各段は「前処理」「特徴量選択」。
 - 分類の `ridge` に `RidgeClassifier` ではなく `LogisticRegression` を当てるのは、`log_loss` と `roc_auc` に要る確率（`predict_proba`）を出せるため（案）。
-- `lightgbm` は追加の依存（`mloom[lightgbm]`）にする（案）。入っていない環境で `model: lightgbm` を指定したら、インストール方法を示してエラーで止める。`hist_gradient_boosting` に置き換えるときに、`lightgbm` と追加の依存をなくす（未実装）。
-- `hist_gradient_boosting` の `early_stopping` は `False` に固定する（2026-11-26 ユーザー判断、未実装）。既定の `"auto"` は、1 万行を超えると学習データの 10% を内部の検証に取ってしまい、CV と最終学習で使う行が変わるため。
+- たたき台の実装にあった `lightgbm`（追加の依存 `mloom[lightgbm]`）は、`hist_gradient_boosting` に置き換えてなくした（2026-11-26 に実装）。`pyproject.toml` の追加の依存と dev の依存、`run.json` の `versions.lightgbm` も消した。
+- `hist_gradient_boosting` の `early_stopping` は `False` に固定する（2026-11-26 ユーザー判断。2026-11-26 に実装）。既定の `"auto"` は、1 万行を超えると学習データの 10% を内部の検証に取ってしまい、CV と最終学習で使う行が変わるため。
 - `task` に対応しないモデルを指定したら、学習を始める前にエラーで止める（終了コード 2）。
 
 ## 出力
@@ -455,13 +466,13 @@ n_neighbors = 5
 mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16。2026-11-26 に実装）:
 
 - たたき台の実装では、Pipeline の先頭が mloom の `ColumnSelector` だったので、pickle を読む環境にも mloom が要った。
-- `ColumnSelector` をやめ、scikit-learn の `ColumnTransformer([("keep", "passthrough", 候補列)], remainder="drop")` で列を選ぶ。その後ろ（前処理・`SelectKBest`・推定器）は、たたき台のまま。
+- `ColumnSelector` をやめ、scikit-learn の `ColumnTransformer([("keep", "passthrough", 候補列)], remainder="drop")` で列を選ぶ。その後ろは、前処理・採用した列の選択・推定器（「前処理」「特徴量選択」。たたき台の実装では前処理・`SelectKBest`・推定器だった）。
 - 読むときは、`pickle.load` の結果の `pipeline` の `predict` に、候補列（`run.json` の `candidate_columns`）を含む表（polars または pandas の DataFrame）を渡す。
 - 2026-11-26 に scikit-learn 1.9.1・polars 2.2.0 で確かめたこと:
   - polars と pandas の表のどちらでも予測できる。
   - 列の順を入れ替えても、余分な列があっても、同じ予測になる（`tests/test_optimize.py`）。
   - 候補列が無い表では、`ValueError: columns are missing` になる。
-  - null がある整数の列と bool の列は、float64 の NaN になって補完される。
+  - null がある整数の列と bool の列は、float64 の NaN になって欠損として扱われる（補完するモデルでも、補完しないモデルでも予測できることを、2026-11-26 に `ridge` と `hist_gradient_boosting` で確かめた）。
   - pickle に `mloom` という文字列が含まれず、`sys.modules["mloom"] = None` で mloom の import を塞いだ Python でも読んで予測できる（`tests/test_predict.py`）。
 - 予測する環境には、学習時と同じ版の scikit-learn・numpy・scipy と、入力に使う polars か pandas が要る。版は `run.json` の `versions` を見て揃える。
 - pickle の中身は Pipeline ではなく、次の辞書にする。行のフィルタは scikit-learn の Pipeline に入れられないため（部品は行の数を変えられない。学習時は目的変数とずれ、予測時は入力の行と予測が対応しなくなる）。辞書と Pipeline には、mloom のクラス・関数・lambda を入れない。
@@ -491,7 +502,7 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
 決定事項（2026-11-26 ユーザー判断。未決 10）: `mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 に実装、`mloom.prediction`。スコア・混同行列・SHAP は未実装）。
 
 - 処理: `model.pkl` を読み、フィルタを適用し、条件を満たす行だけを予測し、満たさない行は NaN にして、入力と同じ行数・同じ順で返す。
-- 説明変数の無限大は Pipeline の中で欠損になるので、予測の入口では特別に扱わない（「行の除外」。未実装。今は scikit-learn の `ValueError` になる）。
+- 説明変数の無限大は Pipeline の中で欠損になるので、予測の入口では特別に扱わない（「行の除外」。2026-11-26 に実装。その行にも予測値が返る）。
 - この入口を使う環境には mloom が要る。`model.pkl` 自体は mloom なしでも読める。
 
 出力の列（2026-11-26 ユーザー判断。未決 20）。列の順は、`--keep-columns` の列 → `prediction` → `passed_filter` → `used_for_training` → `proba_<クラス>`（`pipeline.classes_` の順、クラス名は `str()`）。入力を確かめる列が先にあると読みやすいため。スコア・混同行列・SHAP の列（未実装）は、その後ろに足す。
@@ -587,11 +598,11 @@ SHAP の寄与（2026-11-26 ユーザー判断、未実装）:
 
 - 一番上の `filters` と `train_filters`（渡した条件そのまま）、`data` の `n_rows_filtered_out` と `n_rows_train_filtered_out` を足した（2026-11-26、「行のフィルタ」）。
 
-2026-11-26 の決定で、次を変える（未実装。キーの名前は案）:
-
-- `data.n_rows_with_infinite` を `n_rows_with_infinite_target`（目的変数の無限大で外した行数）にする。`infinite_by_column` は残す。
-- `settings` に `[clip]` と `[impute]` の値を足す。クリップの上下限と、クリップしなかった列を残す。
-- `versions.lightgbm` をなくす。
+- 2026-11-26 に、次を変えた（「行の除外」「設定ファイル」「前処理」）。
+  - `data.n_rows_with_infinite` を `n_rows_with_infinite_target`（目的変数の無限大で外した行数）にした。`infinite_by_column` は残す。
+  - `settings` を表ごとの入れ子にし、`[clip]` と `[impute]` の値を足した。`sources` も表ごとの入れ子。
+  - `preprocessing.clip` に、最終モデルのクリップの方式・上下限・クリップしなかった列を足した。
+  - `versions.lightgbm` をなくした。
 
 ```json
 {
@@ -600,7 +611,7 @@ SHAP の寄与（2026-11-26 ユーザー判断、未実装）:
   "data": {
     "path": "data/train.parquet", "n_rows": 12500, "n_columns": 320,
     "n_rows_filtered_out": 300, "n_rows_train_filtered_out": 200, "n_rows_used": 1990, "n_unlabeled_rows_used": 9950,
-    "n_rows_without_target": 10000, "n_rows_with_infinite": 60, "infinite_by_column": {"TI-115": 60}
+    "n_rows_without_target": 10000, "n_rows_with_infinite_target": 2, "infinite_by_column": {"TI-115": 60, "quality": 2}
   },
   "target": "quality",
   "task": "regression",
@@ -617,13 +628,24 @@ SHAP の寄与（2026-11-26 ユーザー判断、未実装）:
     "not_in_data": ["FI-205"]
   },
   "settings": {
-    "max_missing_rate": 0.3, "use_unlabeled_rows": true,
-    "sources": {"max_missing_rate": "config/mloom.toml", "use_unlabeled_rows": "C:/.../mloom/config/mloom.toml"},
+    "columns": {"max_missing_rate": 0.3},
+    "preprocessing": {"use_unlabeled_rows": true},
+    "clip": {"method": "iqr", "lower_quantile": 0.01, "upper_quantile": 0.99, "iqr_k": 1.5, "mad_k": 3.0, "sigma_k": 3.0},
+    "impute": {"method": "auto", "fill_value": 0.0, "n_neighbors": 5},
+    "sources": {
+      "columns": {"max_missing_rate": "config/mloom.toml"},
+      "preprocessing": {"use_unlabeled_rows": "C:/.../mloom/config/mloom.toml"},
+      "clip": {"method": "config/mloom.toml", "lower_quantile": "C:/.../mloom/config/mloom.toml", "...": "..."},
+      "impute": {"method": "C:/.../mloom/config/mloom.toml", "...": "..."}
+    },
     "files": [
       {"role": "project", "path": "config/mloom.toml", "found": true},
       {"role": "local_defaults", "path": "C:/.../mloom/config/mloom.local.toml", "found": false},
       {"role": "defaults", "path": "C:/.../mloom/config/mloom.toml", "found": true}
     ]
+  },
+  "preprocessing": {
+    "clip": {"method": "iqr", "bounds": {"TI-102": [-3.1, 3.2]}, "unclipped_columns": ["PI-900"]}
   },
   "excluded_columns": [
     {"name": "timestamp", "reason": "role", "detail": null},
@@ -640,7 +662,7 @@ SHAP の寄与（2026-11-26 ユーザー判断、未実装）:
   "hpo": {"sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 100, "n_trials_failed": 0, "timeout": null, "best_trial": 57},
   "best_params": {"alpha": 0.31, "k": 42},
   "cv_scores": {"folds": [0.81, 0.79, 0.84, 0.80, 0.82], "mean": 0.812, "std": 0.017},
-  "versions": {"python": "3.13.13", "mloom": "0.1.0", "scikit-learn": "1.9.1", "optuna": "5.1.0", "polars": "2.2.0", "numpy": "...", "scipy": "...", "lightgbm": null}
+  "versions": {"python": "3.13.13", "mloom": "0.1.0", "scikit-learn": "1.9.1", "optuna": "5.1.0", "polars": "2.2.0", "numpy": "...", "scipy": "..."}
 }
 ```
 
@@ -745,9 +767,8 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | 用途 | ライブラリ |
 | --- | --- |
 | データの読み込みと列の除外 | polars |
-| Pipeline、CV、特徴量選択、モデル | scikit-learn |
+| Pipeline、前処理、CV、特徴量選択、モデル（勾配ブースティングも） | scikit-learn |
 | HPO | optuna |
-| LightGBM（追加の依存。`hist_gradient_boosting` への置き換えでなくす。未実装） | lightgbm |
 | 予測時の SHAP の寄与（未実装） | shap |
 | パッケージ管理 | uv |
 | lint、型チェック、テスト | ruff、ty、pytest |
@@ -760,14 +781,16 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | `mloom.errors` | 例外（`InputError` は終了コード 2、それ以外は 1） |
 | `mloom.config` | `Config` の定義と、データが要らない検査 |
 | `mloom.metrics` | 評価指標と、タスクごとに選べる指標 |
-| `mloom.models` | モデルのレジストリ（推定器、標準化の要否、探索空間） |
+| `mloom.models` | モデルのレジストリ（推定器、標準化の要否、欠損を扱えるかと `auto` の補完、探索空間） |
 | `mloom.data` | データの読み込み |
 | `mloom.sensors` | `unavailable-sensors.json` の読み込み |
 | `mloom.settings` | 設定ファイル（`mloom.toml`）とその既定値の読み込み |
-| `mloom.rows` | 学習に使う行の選択（目的変数の欠損、無限大） |
+| `mloom.rows` | 学習に使う行の選択（目的変数の欠損と無限大）と、列ごとの無限大の行数 |
 | `mloom.columns` | 列の除外と理由の記録 |
 | `mloom.cv` | ユーザーが指定した CV の分割 |
-| `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選ぶ） |
+| `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選ぶ。前処理の方式の決定と fit、採用した列の選択） |
+| `mloom.clip` | クリップの上下限の計算と、`run.json` の `preprocessing.clip` |
+| `mloom.selection` | 特徴量選択のランク付け（Pipeline の外で、分割ごとに 1 回） |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
 | `mloom.result` | `Result` と保存（`model.pkl`、`run.json`） |
 | `mloom.dtypes` | 列の型を、フィルタと行のハッシュが比べる値の種類（数値、真偽値、文字列、日時、日付）として読む |
@@ -784,7 +807,7 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | 2 | 分類の範囲 | 2 値と多値の両方。クラスの不均衡への対応（`class_weight` を探索するか）は後回し |
 | 3 | CV で選べる方法 | `timeseries`、`group`、`kfold` の 3 つ。時系列かつグループ（ロットごとに時刻順）の分割が要るか |
 | 4 | `timeseries` の時刻の列 | `time_column` を必須にする。行の並び順を時刻順とみなす指定も許すか |
-| 5 | 特徴量選択の方法 | `SelectKBest` の `k` を HPO で探索。相関の高い列の間引きを足すか |
+| 5 | 特徴量選択の方法 | `f_regression`・`f_classif` のランクの上位 `k` 列（`k` を HPO で探索）。相関の高い列の間引きを足すか |
 | 6 | `unavailable-sensors.json` の形式と照合 | `{"sensors": [{"name", "reason"}]}`、列名の完全一致。接頭辞やパターンでの照合が要るか |
 | 7 | 数値でない列の扱い | 除外する（エンコードしない） |
 | 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`hist_gradient_boosting`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |
@@ -793,7 +816,7 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | 11 | HPO の試行の記録 | `run.json` は最良の試行だけ。全試行を `trials.csv` に出すか |
 | 12 | Skill の配布方法 | **決定**（2026-11-26）: 各ベンダーの既定の置き場所に、clone の Skill を指すジャンクションを置く。→「配布と実行」 |
 | 13 | 利用環境への導入 | **決定**（2026-11-26）: 利用側リポジトリとは別に clone し、`uv run --project <clone>` で実行する。→「配布と実行」 |
-| 14 | 並列実行 | Optuna の `n_jobs` やモデルの `n_jobs` を使うか（再現性とのトレードオフ） |
+| 14 | 並列実行 | Optuna の `n_jobs` やモデルの `n_jobs` を使うか（再現性とのトレードオフ）。`HistGradientBoosting` の OpenMP のスレッド数は結果を変えない（2026-11-26 確認。「モデル」） |
 | 15 | 複数の目的変数 | 「まずは 1 個」の次の段階で、目的変数ごとに別の Pipeline を作るか、1 つのモデルで同時に予測するか |
 | 16 | pickle の読み込みに mloom が要る | **決定**（2026-11-26）: mloom への依存をなくし、`ColumnTransformer` で列を選ぶ。→「`model.pkl`」 |
 | 17 | CV の方法の警告 | 日時型の列があるのに `kfold` を指定したときに、`run.json` と標準エラーに警告を出すか |
@@ -817,12 +840,12 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 - mloom が無い環境で `model.pkl` を `pickle.load` し、README の手順で予測できる（2026-11-26 テストと README の手順で確認）。
 - `mloom predict` で予測すると、入力と同じ行数・同じ順で予測が返り、フィルタの条件を満たさない行は NaN になる（2026-11-26 テストで確認）。
 - 学習に使った表をそのまま `mloom predict` に渡すと、最終モデルの学習に使った行だけで `used_for_training` が true になる（説明変数が同じで目的変数だけが欠損した行は false になる）（2026-11-26 テストで確認）。
-- 欠損を含むデータで、補完しない既定のまま `hist_gradient_boosting` と `random_forest` を学習できる。
+- 欠損を含むデータで、補完しない既定のまま `hist_gradient_boosting` と `random_forest` を学習できる（2026-11-26 テストで確認）。
 - `--shap` を付けると、行ごとに `shap_base` と SHAP の寄与の合計が予測値（分類は対数オッズか確率）と一致する。
 - `train_filters` で 9 月までに絞って学習すると、1 年分を `mloom predict` に渡したとき、10 月以降の行も予測され、`used_for_training` が false になる（2026-11-26 テストで、`train_filters` で外した行が予測されて false になることを確認）。
 - 回帰の `mloom predict` で、学習期間の後の行だけに `error` が入り、`rmse`・`r2` がその行だけで計算される。
 - 閾値を与えると、`cm` と `accuracy`・`precision`・`recall` が、学習期間の後の行だけで計算される。
 - `str_contains_all`・`str_contains_any` と、日時の列との比較で、学習の行を絞れる（2026-11-26 テストで確認）。
-- 説明変数に無限大がある行も、学習から外されず、予測でも値が返る。
-- クリップと補完のそれぞれの方式で、学習と予測ができる。
-- 上の 4 つのモデルは、`lightgbm` を `hist_gradient_boosting` に置き換えたもので確かめる。
+- 説明変数に無限大がある行も、学習から外されず、予測でも値が返る（2026-11-26 テストで確認）。
+- クリップと補完のそれぞれの方式で、学習と予測ができる（2026-11-26 テストで確認）。
+- 上の 4 つのモデルは、`lightgbm` を `hist_gradient_boosting` に置き換えたもので確かめる（2026-11-26 テストで確認）。

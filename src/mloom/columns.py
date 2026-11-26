@@ -181,16 +181,21 @@ def _value_reason(
     dtype = frame.schema[name]
     if not (dtype.is_numeric() or dtype == pl.Boolean):
         return ExcludedColumn(name, "non_numeric", str(dtype))
-    values = frame.select(as_float(name)).to_series()
+    values = frame.select(_feature(name)).to_series()
     n_missing = values.null_count()
     if n_missing == frame.height:
         return ExcludedColumn(name, "all_null")
     if values.drop_nulls().n_unique() == 1:
         return ExcludedColumn(name, "constant")
     labeled_rate = n_missing / frame.height
-    n_missing_all = n_missing + unlabeled.select(as_float(name).null_count()).item()
+    n_missing_all = n_missing + unlabeled.select(_feature(name).null_count()).item()
     all_rate = n_missing_all / (frame.height + unlabeled.height)
     if max(labeled_rate, all_rate) > max_missing_rate:
         return ExcludedColumn(name, "high_missing", f"labeled {labeled_rate:.3f}, all {all_rate:.3f}")
     return None
 
+
+def _feature(name: str) -> pl.Expr:
+    # +inf and -inf count as missing, as the pipeline turns them into NaN.
+    value = as_float(name)
+    return pl.when(value.is_infinite()).then(None).otherwise(value)

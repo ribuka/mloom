@@ -6,13 +6,38 @@
 #   2. config/mloom.local.toml of this repository (not tracked by git; defaults of one machine)
 #   3. this file
 # This file is also shipped in the wheel, for an installation without a clone of this repository.
+# A key is named by its table: [clip] method and [impute] method are different keys.
 
 [columns]
 # A feature column whose missing rate is above this, in the rows with a target or in all rows,
-# is excluded (high_missing). 0 to 1.
+# is excluded (high_missing). +inf and -inf count as missing. 0 to 1.
 max_missing_rate = 0.5
 
 [preprocessing]
-# Whether rows without a target are used for the missing rates and for the median of the
-# imputation and the mean and standard deviation of the scaling.
+# Whether rows without a target are used for the missing rates and for the statistics of the
+# clipping, the imputation and the scaling.
 use_unlabeled_rows = true
+
+[clip]
+# How every feature is clipped: none, quantile, iqr, mad or sigma. The bounds come from the
+# finite values of the statistic rows; a column whose bounds fall on one point is not clipped.
+method = "none"
+# quantile: from the lower_quantile to the upper_quantile. 0 <= lower < upper <= 1.
+lower_quantile = 0.01
+upper_quantile = 0.99
+# iqr: Q1 - k*IQR to Q3 + k*IQR. A positive number.
+iqr_k = 1.5
+# mad: median -+ k * 1.4826 * MAD. A positive number.
+mad_k = 3.0
+# sigma: mean -+ k * standard deviation (ddof=0). A positive number.
+sigma_k = 3.0
+
+[impute]
+# How missing features (and +inf, -inf) are filled: auto, none, median, mean, most_frequent,
+# constant, knn or iterative. auto is median for ridge and pls, and none for
+# hist_gradient_boosting and random_forest. none is an error with ridge and pls.
+method = "auto"
+# constant: the value that fills. A number.
+fill_value = 0.0
+# knn: the number of neighbors. An integer of 1 or more.
+n_neighbors = 5

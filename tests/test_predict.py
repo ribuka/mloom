@@ -96,6 +96,22 @@ def test_used_for_training_marks_exactly_the_rows_trained_on(data: pl.DataFrame,
     assert not output.tail(9)["used_for_training"].any()
 
 
+@pytest.mark.parametrize("model", ["ridge", "hist_gradient_boosting"])
+def test_rows_with_infinite_features_are_predicted(
+    data: pl.DataFrame, make_config: Callable[..., Config], model: str
+) -> None:
+    """A row with +inf or -inf in a feature gets a finite prediction, as with a missing value."""
+    result = optimize_model(data, make_config(model=model))
+    changed = data.with_columns(
+        s0=pl.when(pl.col("t") == 1).then(float("inf")).otherwise(pl.col("s0")),
+        s1=pl.when(pl.col("t") == 2).then(float("-inf")).otherwise(pl.col("s1")),
+    )
+    output = predict(result.model_bundle(), changed)
+    rows = changed["t"].is_in([1, 2])
+    assert rows.sum() == 4  # the rows and their copies without a target
+    assert output.filter(rows)["prediction"].is_finite().all()
+
+
 def test_changed_value_is_not_used_for_training(data: pl.DataFrame, trained: Result) -> None:
     """A row whose value was changed after training does not match its hash."""
     changed = data.with_columns(s5=pl.col("s5") + 1e-9)
@@ -178,7 +194,15 @@ np.save(sys.argv[3], bundle["pipeline"].predict(pl.read_parquet(sys.argv[2])))
 """
 
 
-@pytest.mark.parametrize(("model", "task", "target"), [("ridge", "regression", "y"), ("random_forest", "classification", "c")])
+@pytest.mark.parametrize(
+    ("model", "task", "target", "settings"),
+    [
+        ("ridge", "regression", "y", ""),
+        ("random_forest", "classification", "c", ""),
+        ("ridge", "regression", "y", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'knn'\n"),
+        ("hist_gradient_boosting", "classification", "c", "[clip]\nmethod = 'iqr'\n[impute]\nmethod = 'iterative'\n"),
+    ],
+)
 def test_model_pkl_is_read_and_predicts_without_mloom(
     frame: pl.DataFrame,
     make_config: Callable[..., Config],
@@ -186,11 +210,21 @@ def test_model_pkl_is_read_and_predicts_without_mloom(
     model: str,
     task: str,
     target: str,
+    settings: str,
 ) -> None:
-    """A Python that cannot import mloom reads ``model.pkl`` and predicts what mloom predicts."""
-    result = optimize_model(frame, make_config(model=model, task=task, target=target))
+    """A Python that cannot import mloom reads ``model.pkl`` and predicts what mloom predicts.
+
+    It holds with the clipping and the imputations that use the other columns, and with +-inf and NaN.
+    """
+    data = frame.with_columns(
+        s0=pl.when(pl.col("t") % 9 == 0).then(float("-inf")).otherwise(pl.col("s0")),
+        s1=pl.when(pl.col("t") % 8 == 0).then(None).otherwise(pl.col("s1")),
+    )
+    settings_path = tmp_path / "mloom.toml"
+    settings_path.write_text(settings, encoding="utf-8")
+    result = optimize_model(data, make_config(model=model, task=task, target=target, settings=settings_path))
     result.save(tmp_path)
-    frame.write_parquet(tmp_path / "data.parquet")
+    data.write_parquet(tmp_path / "data.parquet")
     assert b"mloom" not in (tmp_path / "model.pkl").read_bytes()
 
     out = tmp_path / "predictions.npy"
@@ -199,4 +233,4 @@ def test_model_pkl_is_read_and_predicts_without_mloom(
         [sys.executable, "-I", "-c", _WITHOUT_MLOOM, *paths], capture_output=True, text=True, check=False
     )
     assert completed.returncode == 0, completed.stderr
-    np.testing.assert_array_equal(np.load(out, allow_pickle=True), result.pipeline.predict(frame))
+    np.testing.assert_array_equal(np.load(out, allow_pickle=True), result.pipeline.predict(data))

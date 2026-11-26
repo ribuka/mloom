@@ -24,7 +24,7 @@ from mloom.settings import Settings
 
 MODEL_FILE = "model.pkl"
 RUN_FILE = "run.json"
-_PACKAGES = ("mloom", "scikit-learn", "optuna", "polars", "numpy", "scipy", "lightgbm")
+_PACKAGES = ("mloom", "scikit-learn", "optuna", "polars", "numpy", "scipy")
 
 
 @dataclass(frozen=True)
@@ -50,8 +50,8 @@ class DataSummary:
     n_rows_without_target : int
         Rows whose target is missing (null or NaN), among those left by the
         filters. They are not trained on; some may join the statistics.
-    n_rows_with_infinite : int
-        Rows dropped because of +inf or -inf.
+    n_rows_with_infinite_target : int
+        Rows dropped because their target is +inf or -inf.
     infinite_by_column : dict[str, int]
         Rows with +inf or -inf in each column (``mloom.rows.TrainingRows``).
     """
@@ -64,7 +64,7 @@ class DataSummary:
     n_rows_used: int
     n_unlabeled_rows_used: int
     n_rows_without_target: int
-    n_rows_with_infinite: int
+    n_rows_with_infinite_target: int
     infinite_by_column: dict[str, int]
 
 
@@ -85,6 +85,8 @@ class Result:
         The unavailable sensors that were read.
     settings : Settings
         The settings that were used.
+    clip : dict[str, Any]
+        The clipping of the fitted pipeline (``mloom.clip.describe_clip``).
     columns : ColumnPlan
         The candidate and excluded columns.
     selected_columns : list[str]
@@ -110,6 +112,7 @@ class Result:
     data: DataSummary
     sensors: UnavailableSensors
     settings: Settings
+    clip: dict[str, Any]
     columns: ColumnPlan
     selected_columns: list[str]
     best_params: dict[str, Any]
@@ -147,6 +150,7 @@ class Result:
                 "not_in_data": self.columns.sensors_not_in_data,
             },
             "settings": self.settings.to_dict(),
+            "preprocessing": {"clip": self.clip},
             "excluded_columns": [vars(column) for column in self.columns.excluded],
             "candidate_columns": self.columns.candidates,
             "selected_columns": self.selected_columns,

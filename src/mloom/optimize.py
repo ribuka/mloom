@@ -13,6 +13,7 @@ import polars as pl
 from sklearn.metrics import get_scorer
 from sklearn.pipeline import Pipeline
 
+from mloom.clip import describe_clip
 from mloom.columns import check_columns, check_role_values, plan_columns
 from mloom.config import Config
 from mloom.cv import CVPlan, order_rows, plan_cv
@@ -20,10 +21,19 @@ from mloom.data import Data, load_data
 from mloom.errors import InputError, OptimizationError
 from mloom.filters import apply_filters
 from mloom.metrics import BINARY_ONLY_METRICS
-from mloom.pipeline import as_float, build_pipeline, fit_preprocess, to_matrix
+from mloom.pipeline import (
+    Preprocessing,
+    as_float,
+    build_pipeline,
+    fit_preprocess,
+    fitted_clip_bounds,
+    plan_preprocessing,
+    to_matrix,
+)
 from mloom.result import DataSummary, Result
 from mloom.row_hash import check_hashable, hash_columns, hash_rows
 from mloom.rows import select_rows
+from mloom.selection import rank_columns, top_columns
 from mloom.sensors import load_unavailable_sensors
 from mloom.settings import load_settings
 
@@ -50,8 +60,9 @@ def optimize_model(data: Data, config: Config) -> Result:
     ------
     InputError
         When the data, ``unavailable-sensors.json`` or ``mloom.toml`` is
-        invalid or does not fit the config, including the row filters, or no row
-        is left after the filters.
+        invalid or does not fit the config, including the row filters and the
+        imputation the model cannot do without, or no row is left after the
+        filters.
         Raised before any model is fitted.
     OptimizationError
         When no trial of the search finished with a score.
@@ -59,26 +70,28 @@ def optimize_model(data: Data, config: Config) -> Result:
     frame, path = load_data(data)
     sensors = load_unavailable_sensors(config.unavailable_sensors)
     settings = load_settings(config.settings)
+    preprocessing = plan_preprocessing(config, settings)
     check_columns(frame, config, sensors)
     filtered = apply_filters(frame, config.filters, "filters")
     trainable = apply_filters(filtered, config.train_filters, "train_filters")
     check_role_values(trainable, config)
     check_hashable(trainable.schema, [config.target, *config.role_columns])
-    training = select_rows(trainable, config, sensors, use_unlabeled=settings.use_unlabeled_rows)
+    training = select_rows(trainable, config, sensors, use_unlabeled=settings.preprocessing.use_unlabeled_rows)
     rows = order_rows(training.labeled, config)
     y = _target(rows, config)
-    columns = plan_columns(rows, training.unlabeled, config, sensors, settings.max_missing_rate)
+    columns = plan_columns(rows, training.unlabeled, config, sensors, settings.columns.max_missing_rate)
     cv_plan = plan_cv(rows, y, training.unlabeled, config)
     x = to_matrix(rows, columns.candidates)
     x_unlabeled = to_matrix(training.unlabeled, columns.candidates)
 
-    study = _search(config, x, y, x_unlabeled, cv_plan)
+    study = _search(config, preprocessing, x, y, x_unlabeled, cv_plan)
     best = study.best_trial
     params = {name: value for name, value in best.params.items() if name != K_PARAM}
-    preprocess = fit_preprocess(config, np.vstack([x, x_unlabeled]))
-    pipeline = build_pipeline(config, params, best.params[K_PARAM], preprocess, columns.candidates)
+    x_statistics = np.vstack([x, x_unlabeled])
+    preprocess = fit_preprocess(preprocessing, x_statistics)
+    keep = top_columns(rank_columns(config.task, preprocess, x, y, x_statistics), best.params[K_PARAM])
+    pipeline = build_pipeline(config, params, preprocess, keep, columns.candidates)
     pipeline.fit(rows, y)
-    keep = pipeline.named_steps["select"].get_support()
     fold_scores = best.user_attrs["fold_scores"]
 
     return Result(
@@ -93,13 +106,14 @@ def optimize_model(data: Data, config: Config) -> Result:
             n_rows_used=rows.height,
             n_unlabeled_rows_used=training.unlabeled.height,
             n_rows_without_target=training.n_without_target,
-            n_rows_with_infinite=training.n_with_infinite,
+            n_rows_with_infinite_target=training.n_with_infinite_target,
             infinite_by_column=training.infinite_by_column,
         ),
         sensors=sensors,
         settings=settings,
+        clip=describe_clip(settings.clip.method, fitted_clip_bounds(preprocess), columns.candidates),
         columns=columns,
-        selected_columns=[name for name, kept in zip(columns.candidates, keep, strict=True) if kept],
+        selected_columns=[columns.candidates[i] for i in keep],
         best_params=best.params,
         cv_scores={"folds": fold_scores, "mean": float(np.mean(fold_scores)), "std": float(np.std(fold_scores))},
         cv=cv_plan.describe(config),
@@ -124,14 +138,14 @@ def _target(rows: pl.DataFrame, config: Config) -> np.ndarray:
 
 
 def _search(
-    config: Config, x: np.ndarray, y: np.ndarray, x_unlabeled: np.ndarray, cv_plan: CVPlan
+    config: Config, preprocessing: Preprocessing, x: np.ndarray, y: np.ndarray, x_unlabeled: np.ndarray, cv_plan: CVPlan
 ) -> optuna.Study:
     n_candidates = x.shape[1]
     metric = config.metric_spec
     scorer = get_scorer(metric.scorer)
-    # The preprocessing uses no target, so each fold fits it once for every trial.
-    preprocesses = [
-        fit_preprocess(config, np.vstack([x[train], x_unlabeled[unlabeled]]))
+    # Each fold fits the preprocessing and ranks the columns once for every trial.
+    prepared = [
+        _prepare_fold(config, preprocessing, (x[train], y[train]), x_unlabeled[unlabeled])
         for (train, _), unlabeled in zip(cv_plan.folds, cv_plan.unlabeled_folds, strict=True)
     ]
 
@@ -139,8 +153,8 @@ def _search(
         params = config.model_spec.suggest(trial, n_candidates)
         k = trial.suggest_int(K_PARAM, 1, n_candidates, log=True)
         fold_scores = []
-        for (train, test), preprocess in zip(cv_plan.folds, preprocesses, strict=True):
-            pipeline = build_pipeline(config, params, k, preprocess)
+        for (train, test), (preprocess, ranking) in zip(cv_plan.folds, prepared, strict=True):
+            pipeline = build_pipeline(config, params, preprocess, top_columns(ranking, k))
             score = _score_fold(pipeline, scorer, (x[train], y[train]), (x[test], y[test]))
             fold_scores.append(metric.report_value(score))
         trial.set_user_attr("fold_scores", fold_scores)
@@ -152,6 +166,15 @@ def _search(
     if not _completed(study):
         raise OptimizationError("no trial finished with a score; see the warnings of the failed trials")
     return study
+
+
+def _prepare_fold(
+    config: Config, preprocessing: Preprocessing, train: tuple[np.ndarray, np.ndarray], x_unlabeled: np.ndarray
+) -> tuple[Pipeline, np.ndarray]:
+    # The statistics come from the training side; the ranking, from its labeled rows only.
+    x_statistics = np.vstack([train[0], x_unlabeled])
+    preprocess = fit_preprocess(preprocessing, x_statistics)
+    return preprocess, rank_columns(config.task, preprocess, *train, x_statistics)
 
 
 def _score_fold(

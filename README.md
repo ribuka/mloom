@@ -10,12 +10,12 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、使え
 ```powershell
 uv sync
 uv run examples/make_sample_data.py
-uv run mloom optimize data/sample.parquet --target quality --task regression --model lightgbm --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors examples/unavailable-sensors.json --n-trials 20 --output outputs/quality-lightgbm
+uv run mloom optimize data/sample.parquet --target quality --task regression --model hist_gradient_boosting --cv timeseries --time-column timestamp --exclude-columns grade --unavailable-sensors examples/unavailable-sensors.json --n-trials 20 --output outputs/quality-hgb
 ```
 
-- `outputs/quality-lightgbm/` に `model.pkl` と `run.json` ができます。
+- `outputs/quality-hgb/` に `model.pkl` と `run.json` ができます。
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
-- 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値 `max_missing_rate` と、目的変数が欠損した行を統計量に使うか `use_unlabeled_rows` を変えられます。
+- 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式を変えられます（下の「前処理」）。
 - `unavailable-sensors.json` と `mloom.toml` は、mloom を使う側のリポジトリの `config/` に置きます。
 
 ## 設定の既定値
@@ -24,8 +24,8 @@ uv run mloom optimize data/sample.parquet --target quality --task regression --m
 
 1. `config/mloom.local.toml`: その PC だけの既定値。git 対象外です。mloom を clone から実行したときだけ読みます。
 2. [config/mloom.toml](config/mloom.toml): すべてのキーの既定値と説明。wheel にも同梱されます。
-- 目的変数が欠損している行は学習と評価から外します。ただし既定では、欠損率と、補完の中央値・標準化の平均と標準偏差の計算には使います。
-- 無限大（+inf・-inf）がある行は外し、行数を `run.json` の `data` に残します。
+- 目的変数が欠損している行は学習と評価から外します。ただし既定では、欠損率と、前処理の統計量（クリップの上下限、補完の値、標準化の平均と標準偏差）の計算には使います。
+- 目的変数が無限大（+inf・-inf）の行は外し、行数を `run.json` の `data.n_rows_with_infinite_target` に残します。説明変数の無限大は、学習でも予測でも欠損として扱います（列ごとの行数は `data.infinite_by_column`）。
 - 分類は `--target grade --task classification --exclude-columns quality`、Group の CV は `--cv group --group-column lot` です。
 
 ## 入力
@@ -35,10 +35,21 @@ uv run mloom optimize data/sample.parquet --target quality --task regression --m
 | データ | 位置引数 | Parquet ファイル（API では polars の DataFrame も可） |
 | 目的変数 | `--target` | 列名（1 個） |
 | 回帰か分類か | `--task` | `regression`、`classification` |
-| モデル | `--model` | `ridge`、`pls`（回帰のみ）、`random_forest`、`lightgbm` |
+| モデル | `--model` | `ridge`、`pls`（回帰のみ）、`random_forest`、`hist_gradient_boosting` |
 | CV の方法 | `--cv` | `timeseries`（`--time-column` が必要）、`group`（`--group-column` が必要）、`kfold` |
 
-`lightgbm` を使うには追加の依存 `mloom[lightgbm]` が要ります。その他の引数は `uv run mloom optimize --help` を見てください。
+その他の引数は `uv run mloom optimize --help` を見てください。
+
+## 前処理
+
+説明変数は、Pipeline の中で、無限大を欠損にする → クリップ → 補完 → 標準化（`ridge`・`pls` だけ）の順に処理します。方式は `config/mloom.toml` で選びます（キーと既定値は [config/mloom.toml](config/mloom.toml)）。
+
+| 表 | `method` | 選べるもの |
+| --- | --- | --- |
+| `[clip]` | 既定 `none`（切らない） | `quantile`、`iqr`、`mad`、`sigma`。上下限は欠損と無限大を除いて計算し、ばらつきが 0 の列は切りません |
+| `[impute]` | 既定 `auto` | `none`、`median`、`mean`、`most_frequent`、`constant`、`knn`、`iterative`。`auto` は `ridge`・`pls` では `median`、`hist_gradient_boosting`・`random_forest` では `none`（欠損のまま学習）です。`none` を `ridge`・`pls` で選ぶと終了コード 2 で止まります |
+
+- 使った値は `run.json` の `settings`、最終モデルのクリップの上下限とクリップしなかった列は `preprocessing.clip` に残ります。
 
 ## Python API
 

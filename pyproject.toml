@@ -18,14 +18,8 @@ dependencies = [
 [project.scripts]
 mloom = "mloom.cli:main"
 
-[project.optional-dependencies]
-lightgbm = [
-    "lightgbm>=4.7.0",
-]
-
 [dependency-groups]
 dev = [
-    "lightgbm>=4.7.0",
     "pytest==9.1.1",
     "ruff==0.16.7",
     "ty==0.0.109",
