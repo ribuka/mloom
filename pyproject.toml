@@ -1,7 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "mloom"
-version = "0.1.0"
-description = "Add your description here"
+dynamic = ["version"]
+description = "Feature selection and hyperparameter optimization of a user-chosen model on Parquet data."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "numpy>=2.5.5",
+    "optuna>=5.1.0",
+    "polars>=2.2.0",
+    "scikit-learn>=1.9.1",
+]
+
+[project.scripts]
+mloom = "mloom.cli:main"
+
+[project.optional-dependencies]
+lightgbm = [
+    "lightgbm>=4.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "lightgbm>=4.7.0",
+    "pytest==9.1.1",
+    "ruff==0.16.7",
+    "ty==0.0.109",
+]
+
+[tool.hatch.version]
+path = "VERSION"
+pattern = '^(?P<version>\S+)\s*$'
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mloom"]
+
+# The defaults of the settings, for an installation without a clone (mloom.settings).
+# An editable install also gets site-packages/mloom/defaults.toml; it is harmless (the
+# package in src wins the import, and a clone reads config/mloom.toml directly).
+[tool.hatch.build.targets.wheel.force-include]
+"config/mloom.toml" = "mloom/defaults.toml"
+
+[tool.uv]
+# The version comes from VERSION, so a change to it reinstalls the package.
+cache-keys = [{ file = "pyproject.toml" }, { file = "VERSION" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [".*", "tmp"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "D", "ANN", "C901", "PLR0912", "PLR0915", "RUF100", "ARG", "SIM", "C4", "RET", "PIE"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest injects fixtures as arguments, used or not.
+"tests/**" = ["ARG"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
