@@ -4,13 +4,17 @@ import json
 import pickle
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
 import pytest
 
+import mloom.optimize
 from mloom import Config, InputError, optimize_model
+from mloom.cv import CVPlan, plan_cv
 from mloom.models import MODELS
+from mloom.selection import rank_columns
 
 MODEL_TASKS = [(model, task) for model, spec in MODELS.items() for task in spec.builders]
 
@@ -74,9 +78,10 @@ def test_parquet_path_and_dataframe_agree(
     assert from_path.best_params == from_frame.best_params
 
 
-def test_same_seed_gives_same_result(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+@pytest.mark.parametrize("model", ["random_forest", "hist_gradient_boosting"])
+def test_same_seed_gives_same_result(frame: pl.DataFrame, make_config: Callable[..., Config], model: str) -> None:
     """Two runs with the same data, config and seed select the same columns and parameters."""
-    config = make_config(model="random_forest")
+    config = make_config(model=model)
     first, second = optimize_model(frame, config), optimize_model(frame, config)
     assert first.selected_columns == second.selected_columns
     assert first.best_params == second.best_params
@@ -90,18 +95,25 @@ def test_pipeline_ignores_extra_columns_and_order(frame: pl.DataFrame, make_conf
     np.testing.assert_allclose(result.pipeline.predict(shuffled), result.pipeline.predict(frame))
 
 
-def test_dropped_rows_are_recorded(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
-    """Rows whose target is missing, or with +-inf, are left out and counted in ``run.json``."""
+@pytest.mark.parametrize("model", ["ridge", "hist_gradient_boosting"])
+def test_only_rows_with_an_infinite_target_are_dropped(
+    frame: pl.DataFrame, make_config: Callable[..., Config], model: str
+) -> None:
+    """Rows whose target is missing or +-inf are left out; rows with +-inf in a feature are trained on."""
     data = frame.with_columns(
-        y=pl.when(pl.col("t") < 6).then(float("nan")).otherwise(pl.col("y")),
-        s2=pl.when(pl.col("t") == 10).then(float("inf")).otherwise(pl.col("s2")),
+        y=pl.when(pl.col("t") < 6).then(float("nan")).when(pl.col("t") == 7).then(float("-inf")).otherwise(pl.col("y")),
+        # +-inf in a labeled row (t = 10, 11) and in an unlabeled row (t = 2).
+        s2=pl.when(pl.col("t").is_in([2, 10])).then(float("inf")).otherwise(pl.col("s2")),
+        s3=pl.when(pl.col("t") == 11).then(float("-inf")).otherwise(pl.col("s3")),
     )
-    run = optimize_model(data, make_config()).to_dict()["data"]
+    result = optimize_model(data, make_config(model=model))
+    run = result.to_dict()["data"]
     assert run["n_rows_without_target"] == 6
-    assert run["n_rows_with_infinite"] == 1
-    assert run["infinite_by_column"] == {"s2": 1}
+    assert run["n_rows_with_infinite_target"] == 1
+    assert run["infinite_by_column"] == {"s2": 2, "s3": 1, "y": 1}
     assert run["n_rows_used"] == frame.height - 7
     assert run["n_unlabeled_rows_used"] == 6
+    assert np.isfinite(result.pipeline.predict(data.filter(pl.col("t").is_in([10, 11])))).all()
 
 
 @pytest.mark.parametrize("use_unlabeled", [True, False])
@@ -136,8 +148,8 @@ def test_max_missing_rate_comes_from_settings(
     run = optimize_model(data, make_config(settings=settings)).to_dict()
     high_missing = {"name": "s2", "reason": "high_missing", "detail": "labeled 0.250, all 0.250"}
     assert (high_missing in run["excluded_columns"]) is excluded
-    assert run["settings"]["max_missing_rate"] == rate
-    assert run["settings"]["sources"]["max_missing_rate"] == str(settings)
+    assert run["settings"]["columns"]["max_missing_rate"] == rate
+    assert run["settings"]["sources"]["columns"]["max_missing_rate"] == str(settings)
 
 
 @pytest.mark.parametrize(
@@ -228,3 +240,111 @@ def test_invalid_filters_or_unhashable_columns_raise(
     data = frame.with_columns(d=pl.duration(days=pl.col("t")))
     with pytest.raises(InputError, match=message):
         optimize_model(data, make_config(exclude_columns=("c", "d"), **overrides))
+
+
+def _settings(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "mloom.toml"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def with_missing(frame: pl.DataFrame) -> pl.DataFrame:
+    """Add missing values and +-inf to ``s0`` and ``s1`` of the shared frame (none to the other sensors)."""
+    return frame.with_columns(
+        s0=pl.when(pl.col("t") % 7 == 0).then(None).when(pl.col("t") % 11 == 0).then(float("inf")).otherwise(pl.col("s0")),
+        s1=pl.when(pl.col("t") % 5 == 0).then(float("nan")).otherwise(pl.col("s1")),
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "model", "imputed"),
+    [
+        ("auto", "ridge", True),
+        ("auto", "hist_gradient_boosting", False),
+        ("auto", "random_forest", False),
+        ("none", "hist_gradient_boosting", False),
+        ("median", "ridge", True),
+        ("mean", "hist_gradient_boosting", True),
+        ("most_frequent", "ridge", True),
+        ("constant", "hist_gradient_boosting", True),
+        ("knn", "ridge", True),
+        ("iterative", "hist_gradient_boosting", True),
+    ],
+)
+def test_each_imputation_fits_and_predicts(
+    with_missing: pl.DataFrame,
+    make_config: Callable[..., Config],
+    tmp_path: Path,
+    method: str,
+    model: str,
+    imputed: bool,
+) -> None:
+    """Every ``[impute] method`` trains on data with missing values and +-inf, and predicts every row.
+
+    By default (``auto``), the models that handle missing values get no imputation step.
+    """
+    settings = _settings(tmp_path, f"[impute]\nmethod = '{method}'\n")
+    result = optimize_model(with_missing, make_config(model=model, settings=settings))
+    preprocess = result.pipeline.named_steps["preprocess"].estimator
+    assert ("impute" in preprocess.named_steps) is imputed
+    assert np.isfinite(result.pipeline.predict(with_missing)).all()
+    assert result.to_dict()["settings"]["impute"]["method"] == method
+
+
+def test_clipping_is_recorded_in_run_json(frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path) -> None:
+    """``preprocessing.clip`` holds the bounds of the final model and the columns without spread."""
+    # flat has an IQR of 0, so it is not clipped; it is not constant, so it stays a candidate.
+    data = frame.with_columns(flat=pl.when(pl.col("t") < 3).then(1.0).otherwise(0.0))
+    settings = _settings(tmp_path, "[clip]\nmethod = 'iqr'\niqr_k = 1.0\n")
+    run = optimize_model(data, make_config(settings=settings)).to_dict()
+    clip = run["preprocessing"]["clip"]
+    assert clip["method"] == "iqr"
+    assert clip["unclipped_columns"] == ["flat"]
+    assert set(clip["bounds"]) == set(run["candidate_columns"]) - {"flat"}
+    q1, q3 = np.quantile(data["s0"].to_numpy(), [0.25, 0.75])
+    assert clip["bounds"]["s0"] == pytest.approx([q1 - (q3 - q1), q3 + (q3 - q1)])
+    assert run["settings"]["clip"]["iqr_k"] == 1.0
+
+
+def test_column_related_to_the_target_is_selected(make_config: Callable[..., Config]) -> None:
+    """A column that alone drives the target is in ``selected_columns``, whose length is ``best_params.k``."""
+    rng = np.random.default_rng(1)
+    noise = rng.normal(size=(100, 8))
+    signal = rng.normal(size=100)
+    data = pl.DataFrame(
+        {**{f"n{i}": noise[:, i] for i in range(8)}, "signal": signal, "z": 3.0 * signal + rng.normal(scale=0.1, size=100)}
+    )
+    result = optimize_model(data, make_config(target="z", exclude_columns=(), n_trials=5))
+    assert "signal" in result.selected_columns
+    assert len(result.selected_columns) == result.best_params["k"]
+    assert result.selected_columns == [name for name in result.columns.candidates if name in result.selected_columns]
+
+
+def test_columns_are_ranked_on_the_labeled_training_rows_only(
+    frame: pl.DataFrame, make_config: Callable[..., Config], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each fold ranks once, on its training rows (never its test rows); the final model ranks on all rows."""
+    data = pl.concat([frame, frame.head(20).with_columns(y=pl.lit(None, dtype=pl.Float64), t=pl.col("t") + 1000)])
+    plans: list[CVPlan] = []
+    ranked: list[np.ndarray] = []
+
+    def record_plan(*args: Any) -> CVPlan:  # noqa: ANN401 - the arguments of plan_cv
+        plans.append(plan_cv(*args))
+        return plans[-1]
+
+    def record_ranking(task: str, preprocess: Any, x: np.ndarray, *args: Any) -> np.ndarray:  # noqa: ANN401 - the arguments of rank_columns
+        ranked.append(x)
+        return rank_columns(task, preprocess, x, *args)
+
+    monkeypatch.setattr(mloom.optimize, "plan_cv", record_plan)
+    monkeypatch.setattr(mloom.optimize, "rank_columns", record_ranking)
+    result = optimize_model(data, make_config(n_trials=4))
+
+    t = result.columns.candidates.index("t")
+    times = frame["t"].to_numpy()
+    [plan] = plans
+    assert len(ranked) == len(plan.folds) + 1
+    for (train, _), x in zip(plan.folds, ranked, strict=False):
+        np.testing.assert_array_equal(x[:, t], times[train])
+    np.testing.assert_array_equal(ranked[-1][:, t], times)

@@ -76,6 +76,24 @@ def test_high_missing_uses_both_rates(
     assert details.get("s0") == detail
 
 
+def test_infinite_values_count_as_missing(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+    """+-inf counts as missing for ``all_null``, ``constant`` and ``high_missing``, in labeled and unlabeled rows."""
+    inf = float("inf")
+    labeled = frame.head(60).with_columns(
+        all_infinite=pl.lit(inf),
+        # 1.0 and +-inf only: constant once +-inf is missing.
+        one_value=pl.when(pl.int_range(pl.len()) % 2 == 0).then(1.0).otherwise(-inf),
+        # +inf in 20% of the labeled rows and 100% of the unlabeled ones: all 0.6.
+        mostly_infinite=pl.when(pl.int_range(pl.len()) < 12).then(inf).otherwise(pl.col("s0")),
+    )
+    unlabeled = frame.tail(60).with_columns(all_infinite=pl.lit(1.0), one_value=pl.lit(1.0), mostly_infinite=pl.lit(inf))
+    plan = plan_columns(labeled, unlabeled, make_config(), NO_SENSORS, 0.5)
+    excluded = {column.name: (column.reason, column.detail) for column in plan.excluded}
+    assert excluded["all_infinite"] == ("all_null", None)
+    assert excluded["one_value"] == ("constant", None)
+    assert excluded["mostly_infinite"] == ("high_missing", "labeled 0.200, all 0.600")
+
+
 def test_no_candidate_raises(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
     """When every column is excluded, ``InputError`` is raised."""
     config = make_config(exclude_columns=("t", "s0", "s1", "s2", "s3", "s4", "s5", "c"))

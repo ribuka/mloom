@@ -6,6 +6,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+import mloom.optimize
 from mloom.cli import EXIT_INPUT, EXIT_OK, main
 from mloom.prediction import predict
 
@@ -53,13 +54,29 @@ def test_optimize_saves_and_prints_run_json(
     run = json.loads(run_path.read_text(encoding="utf-8"))
     assert run["unavailable_sensors"]["found"]
     assert "s0" not in run["candidate_columns"]
-    assert run["settings"]["max_missing_rate"] == 0.3
+    assert run["settings"]["columns"]["max_missing_rate"] == 0.3
 
 
 def test_invalid_input_exits_with_2(data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """An input error prints a message to stderr and returns exit code 2."""
     assert main(_args(data_path, tmp_path / "out", "--target", "missing")) == EXIT_INPUT
     assert "error: column 'missing' is not in the data" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_no_imputation_with_ridge_exits_with_2_before_training(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[impute] method = "none"`` with ``ridge`` stops with exit code 2 before anything is fitted."""
+
+    def fail(*args: object) -> None:
+        raise AssertionError("the preprocessing was fitted")
+
+    monkeypatch.setattr(mloom.optimize, "fit_preprocess", fail)
+    settings = tmp_path / "mloom.toml"
+    settings.write_text("[impute]\nmethod = 'none'\n", encoding="utf-8")
+    assert main(_args(data_path, tmp_path / "out", "--settings", str(settings))) == EXIT_INPUT
+    assert "[impute] method 'none' needs a model that handles missing values; 'ridge' does not" in capsys.readouterr().err
     assert not (tmp_path / "out").exists()
 
 
