@@ -600,7 +600,7 @@ SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実�
 - 2026-11-26 に shap 0.54.1・scikit-learn 1.9.1・lightgbm 4.7.0 で確かめた `TreeExplainer.shap_values` の形（行 × 列 × クラス。欠損 10% のデータ）: `LGBMRegressor`・`RandomForestRegressor` と 2 値の `LGBMClassifier` は（行, 列）で `expected_value` は 1 つ。多値の `LGBMClassifier` は（行, 列, クラス）で `expected_value` はクラスの数。`RandomForestClassifier` は 2 値でも（行, 列, クラス）なので、2 値では `classes_[1]` の側を取る。
   - `LGBMClassifier` には `decision_function` が無い。基準値と寄与の合計は `predict(x, raw_score=True)`（対数オッズ）と一致する（回帰は `predict`。どれも 2e-14 以内）。
   - 2 値の `LGBMClassifier` では、shap が「出力が ndarray のリストに変わった」という `UserWarning` を出すが、返る値は（行, 列）の 1 つの配列なので、`mloom.explain` はこの警告だけを抑える（2026-11-26 shap 0.54.1 で確認。Issue #20 の実装で決定）。
-- 2026-11-26 に、4 つのモデルとタスク（回帰、2 値分類、3 値分類。`pls` は回帰だけ）の 10 の組み合わせで、行ごとの基準値と寄与の合計が、そのモデルの出力と 1e-6 以内で一致することをテストで確かめた（`tests/test_predict.py`）。
+- 2026-11-26 に、4 つのモデルとタスク（回帰、2 値分類、3 値分類。`pls` は回帰だけ）の 10 の組み合わせで、行ごとの基準値と寄与の合計が、そのモデルの出力と 1e-6 以内で一致することをテストで確かめた（`tests/test_predict.py`）。`lightgbm` では、説明変数の 10% を欠損にしたデータでも、補完しない既定のまま、回帰・2 値分類・3 値分類で予測でき、同じく一致することを確かめた（2026-11-26、Issue #20）。
 - 列は、採用した列ごとの `shap_<列名>` と、基準値の `shap_base`。採用されなかった列は、寄与が常に 0 なので出さない。列の順は、`shap_base`、`selected_columns` の順の `shap_<列名>`。
 - 分類の寄与の単位は、モデルによって違う（`ridge`（`LogisticRegression`）と `lightgbm` は対数オッズ、`random_forest` は確率）。多値分類では、クラスごとに列を出す（`classes_` の順に、`shap_base_<クラス>`、`shap_<クラス>_<列名>`。クラス名は `str()`）。
 - フィルタの外の行は、SHAP の列も NaN にする。

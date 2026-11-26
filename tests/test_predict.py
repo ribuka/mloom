@@ -572,26 +572,41 @@ def _model_output(estimator: Any, x: np.ndarray) -> np.ndarray:  # noqa: ANN401 
     return np.asarray(estimator.decision_function(x)).reshape(len(x), -1)
 
 
+def _with_missing_sensors(table: pl.DataFrame) -> pl.DataFrame:
+    """Make 10% of each sensor missing, on different rows for each sensor."""
+    return table.with_columns(
+        pl.when(pl.col("t") % 10 == index + 1).then(None).otherwise(pl.col(f"s{index}")).alias(f"s{index}")
+        for index in range(6)
+    )
+
+
 @pytest.mark.parametrize(
-    ("model", "task", "n_classes"),
+    ("model", "task", "n_classes", "missing"),
     [
-        ("ridge", "regression", 0),
-        ("pls", "regression", 0),
-        ("random_forest", "regression", 0),
-        ("lightgbm", "regression", 0),
-        ("ridge", "classification", 2),
-        ("random_forest", "classification", 2),
-        ("lightgbm", "classification", 2),
-        ("ridge", "classification", 3),
-        ("random_forest", "classification", 3),
-        ("lightgbm", "classification", 3),
+        ("ridge", "regression", 0, False),
+        ("pls", "regression", 0, False),
+        ("random_forest", "regression", 0, False),
+        ("lightgbm", "regression", 0, False),
+        ("ridge", "classification", 2, False),
+        ("random_forest", "classification", 2, False),
+        ("lightgbm", "classification", 2, False),
+        ("ridge", "classification", 3, False),
+        ("random_forest", "classification", 3, False),
+        ("lightgbm", "classification", 3, False),
+        ("lightgbm", "regression", 0, True),
+        ("lightgbm", "classification", 2, True),
+        ("lightgbm", "classification", 3, True),
     ],
 )
 def test_shap_contributions_add_up_to_the_output(
-    data: pl.DataFrame, make_config: Callable[..., Config], model: str, task: str, n_classes: int
+    data: pl.DataFrame, make_config: Callable[..., Config], model: str, task: str, n_classes: int, missing: bool
 ) -> None:
-    """``shap_base`` plus the contributions is the output of the model, for each selected column and class."""
+    """``shap_base`` plus the contributions is the output of the model, for each selected column and class.
+
+    With ``missing``, the sensors have missing values that the default imputation (``none``) leaves to the model.
+    """
     table = data.with_columns(c=_three_classes()) if n_classes == 3 else data
+    table = _with_missing_sensors(table) if missing else table
     target = "y" if task == "regression" else "c"
     result = optimize_model(table, make_config(model=model, task=task, target=target, filters=FILTERS))
     output = predict(result.model_bundle(), table, shap=True)
@@ -612,7 +627,13 @@ def test_shap_contributions_add_up_to_the_output(
     passed = _passed(table)
     assert all(output.filter(~passed)[name].is_nan().all() for name in names)
     rows = output.filter(passed)
-    expected = _model_output(result.pipeline[-1], estimator_input(result.pipeline, table.filter(passed)))
+    x = estimator_input(result.pipeline, table.filter(passed))
+    # The rows outside the filters are NaN; the others are predicted, also with missing features left as they are.
+    assert np.isnan(x).any() == missing
+    prediction = rows["prediction"]
+    assert prediction.null_count() == 0
+    assert not (prediction.dtype.is_float() and prediction.is_nan().any())
+    expected = _model_output(result.pipeline[-1], x)
     width = len(selected) + 1
     for index in range(len(classes)):
         total = rows.select(names[index * width : (index + 1) * width]).to_numpy().sum(axis=1)
