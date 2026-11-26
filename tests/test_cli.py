@@ -114,6 +114,9 @@ def test_predict_saves_what_the_api_returns(
         ('{"filters": [{"column": "s0", "op": "above", "value": 0}]}', "unknown op"),
         ('{"filters": [{"column": "nope", "op": "is_null"}]}', "column 'nope' is not in the data"),
         ('{"train_filters": [{"column": "s0", "op": "lt", "value": "0"}]}', "does not fit the column"),
+        ('{"filters": [], "where": []}', "unknown keys ['where']"),
+        ('{"filters": [{"column": "s0", "op": "is_between", "value": [0]}]}', "needs a list [lower, upper]"),
+        ('{"filters": [{"column": "s0", "op": "gt", "value": 100}]}', "no row is left after applying filters"),
     ],
 )
 def test_invalid_filters_exit_with_2(
