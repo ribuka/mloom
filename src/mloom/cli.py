@@ -60,12 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     metrics = sorted({name for task_metrics in METRICS.values() for name in task_metrics})
     optimize.add_argument("--metric", choices=metrics, help="default: rmse (regression), log_loss (classification)")
     optimize.add_argument("--exclude-columns", nargs="*", default=[], metavar="COLUMN")
-    optimize.add_argument(
-        "--unavailable-sensors",
-        type=Path,
-        default=DEFAULT_UNAVAILABLE_SENSORS,
-        help=f"JSON of sensors not to use (default: {DEFAULT_UNAVAILABLE_SENSORS})",
-    )
+    _add_sensors_and_filters(optimize)
     optimize.add_argument(
         "--settings",
         type=Path,
@@ -74,11 +69,6 @@ def build_parser() -> argparse.ArgumentParser:
             f"project settings such as max_missing_rate (default: {DEFAULT_SETTINGS}); "
             "keys it does not set come from the defaults of mloom"
         ),
-    )
-    optimize.add_argument(
-        "--filters",
-        type=Path,
-        help='JSON {"filters": [...], "train_filters": [...]} of the conditions on the rows',
     )
     optimize.add_argument("--n-trials", type=int, default=100)
     optimize.add_argument("--timeout", type=float, help="seconds")
@@ -100,6 +90,20 @@ def build_parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show", help="print the record of the run in a model.pkl as JSON")
     show.add_argument("model", type=Path, help="model.pkl saved by optimize")
     return parser
+
+
+def _add_sensors_and_filters(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--unavailable-sensors",
+        type=Path,
+        default=DEFAULT_UNAVAILABLE_SENSORS,
+        help=f"JSON of sensors not to use (default: {DEFAULT_UNAVAILABLE_SENSORS})",
+    )
+    parser.add_argument(
+        "--filters",
+        type=Path,
+        help='JSON {"filters": [...], "train_filters": [...]} of the conditions on the rows',
+    )
 
 
 def to_config(args: argparse.Namespace) -> Config:
