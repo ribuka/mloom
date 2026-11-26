@@ -29,6 +29,8 @@ FILE_KEYS = ("filters", "train_filters")
 _CONDITION_KEYS = {"column", "op", "value"}
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _NANOSECONDS = {"ns": 1, "us": 1_000, "ms": 1_000_000}
+# The UTC offset at the end of an ISO 8601 datetime: Z, +HH, +HH:MM, +HH:MM:SS (and with a fraction).
+_OFFSET = re.compile(r"(?:Z|[+-]\d{2}(?::?\d{2}(?::?\d{2}(?:[.,]\d+)?)?)?)$")
 _VALUE_FORMS = {
     "scalar": "a number, a string or a boolean",
     "list": "a non-empty list of numbers, strings or booleans",
@@ -266,24 +268,28 @@ def _datetime_literal(value: str, dtype: pl.Datetime, where: str) -> pl.Expr:
     if dtype.time_zone is not None and moment.tzinfo is None:
         raise InputError(f"{where}: value {value!r} needs a UTC offset; the column is in {dtype.time_zone}")
     # Count in the unit of the column from the string itself: fromisoformat drops the digits below microseconds.
-    nanoseconds = _epoch_nanoseconds(moment, value)
-    ticks, rest = divmod(nanoseconds or 0, _NANOSECONDS[dtype.time_unit])
-    if nanoseconds is None or rest:
+    ticks, rest = divmod(_epoch_nanoseconds(moment, value, where), _NANOSECONDS[dtype.time_unit])
+    if rest:
         raise InputError(f"{where}: value {value!r} is finer than the time unit {dtype.time_unit} of the column")
     if dtype.time_zone is None:
         return pl.lit(ticks, dtype=pl.Int64).cast(pl.Datetime(dtype.time_unit))
     return pl.lit(ticks, dtype=pl.Int64).cast(pl.Datetime(dtype.time_unit, "UTC")).dt.convert_time_zone(dtype.time_zone)
 
 
-def _epoch_nanoseconds(moment: datetime, value: str) -> int | None:
-    # Nanoseconds since 1970-01-01 (UTC for a value with an offset, the wall time otherwise);
-    # None when the value is finer than a nanosecond.
-    since = moment.replace(tzinfo=moment.tzinfo or UTC) - _EPOCH
-    fraction = re.search(r"[.,](\d+)", value)
+def _epoch_nanoseconds(moment: datetime, value: str, where: str) -> int:
+    # Nanoseconds since 1970-01-01 (UTC for a value with an offset, the wall time otherwise).
+    body = value
+    if moment.tzinfo is not None:
+        offset = _OFFSET.search(value)
+        if offset is None or any(mark in offset.group() for mark in ".,"):
+            raise InputError(f"{where}: value {value!r} needs a UTC offset of whole seconds (Z, +09:00 and so on)")
+        body = value[: offset.start()]
+    fraction = re.search(r"[.,](\d+)$", body)
     below_microseconds = fraction.group(1)[6:] if fraction else ""
     if below_microseconds.rstrip("0")[3:]:
-        return None
+        raise InputError(f"{where}: value {value!r} is finer than a nanosecond")
     extra = int(below_microseconds[:3].ljust(3, "0"))
+    since = moment.replace(tzinfo=moment.tzinfo or UTC) - _EPOCH
     return ((since.days * 86_400 + since.seconds) * 1_000_000 + since.microseconds) * 1_000 + extra
 
 

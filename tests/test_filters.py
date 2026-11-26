@@ -239,5 +239,14 @@ def test_nanoseconds_of_the_value_are_kept() -> None:
 def test_value_finer_than_the_time_unit_raises(unit: Literal["ns", "us", "ms"], value: str) -> None:
     """A value that the time unit of the column cannot hold raises ``InputError`` instead of being truncated."""
     data = pl.DataFrame({"t": pl.Series([0]).cast(pl.Datetime(unit))})
-    with pytest.raises(InputError, match=f"finer than the time unit {unit}"):
+    with pytest.raises(InputError, match="is finer than"):
         _kept(data, {"column": "t", "op": "ge", "value": value})
+
+
+def test_fraction_of_the_offset_is_not_read_as_the_fraction_of_the_time() -> None:
+    """The fraction of seconds is read from the time, not the offset; an offset with a fraction raises."""
+    utc = pl.DataFrame({"t": pl.Series([-3_600_000_000_500, -3_599_999_999_500]).cast(pl.Datetime("ns", "UTC"))})
+    assert _kept(utc, {"column": "t", "op": "eq", "value": "1969-12-31T22:59:59.999999500Z"}) == [True, False]
+    assert _kept(utc, {"column": "t", "op": "eq", "value": "1969-12-31T23:59:59.9999995+01:00:00"}) == [True, False]
+    with pytest.raises(InputError, match="needs a UTC offset of whole seconds"):
+        _kept(utc, {"column": "t", "op": "eq", "value": "1970-01-01T00:00:00+01:00:00.0000005"})
