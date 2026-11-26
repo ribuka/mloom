@@ -1,7 +1,5 @@
 """Tests of ``optimize_model`` and of the pipeline it saves."""
 
-import json
-import pickle
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -11,9 +9,10 @@ import polars as pl
 import pytest
 
 import mloom.optimize
-from mloom import Config, InputError, optimize_model
+from mloom import Config, InputError, optimize_model, read_run
 from mloom.cv import CVPlan, plan_cv
 from mloom.models import MODELS
+from mloom.prediction import load_model
 from mloom.selection import rank_columns
 
 MODEL_TASKS = [(model, task) for model, spec in MODELS.items() for task in spec.builders]
@@ -26,13 +25,11 @@ def test_every_model_fits_saves_and_predicts(
     """Each model and task saves a ``model.pkl`` whose pipeline predicts from the table."""
     target = "y" if task == "regression" else "c"
     result = optimize_model(frame, make_config(model=model, task=task, target=target))
-    run_path = result.save(tmp_path)
+    model_path = result.save(tmp_path)
 
-    with (tmp_path / "model.pkl").open("rb") as file:
-        bundle = pickle.load(file)
-    predictions = bundle["pipeline"].predict(frame)
+    predictions = load_model(model_path)["pipeline"].predict(frame)
     assert len(predictions) == frame.height
-    run = json.loads(run_path.read_text(encoding="utf-8"))
+    run = read_run(model_path)
     assert run["model"] == model
     assert run["task"] == task
     assert set(run["selected_columns"]) <= set(run["candidate_columns"])

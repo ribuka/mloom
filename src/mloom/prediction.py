@@ -6,7 +6,6 @@ confusion matrix come from ``mloom.evaluation``, the SHAP contributions from
 ``mloom.explain``.
 """
 
-import pickle
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -30,6 +29,7 @@ from mloom.evaluation import (
 )
 from mloom.explain import shap_columns, shap_names
 from mloom.filters import filter_mask
+from mloom.model_file import read_model
 from mloom.pipeline import candidate_columns
 from mloom.row_hash import hash_rows
 
@@ -57,7 +57,7 @@ def predict(
     Parameters
     ----------
     model : Model
-        Path of a ``model.pkl``, or the dict read from one.
+        Path of a ``model.pkl``, or the dict of its second pickle.
     data : Data
         Path of a Parquet file, or a polars DataFrame.
     keep_columns : Sequence[str]
@@ -125,12 +125,13 @@ def predict(
 
 
 def load_model(model: Model) -> dict[str, Any]:
-    """Read a ``model.pkl``.
+    """Read the model of a ``model.pkl``, skipping the record of the run.
 
     Parameters
     ----------
     model : Model
-        Path of a ``model.pkl``, or the dict read from one (returned as is).
+        Path of a ``model.pkl``, or the dict of its second pickle (returned as
+        is).
 
     Returns
     -------
@@ -141,16 +142,10 @@ def load_model(model: Model) -> dict[str, Any]:
     Raises
     ------
     InputError
-        When the file does not exist, or does not hold that dict.
+        When the file does not exist, does not start with the record of the
+        run, or its model is not that dict.
     """
-    if isinstance(model, dict):
-        bundle = model
-    else:
-        path = Path(model)
-        if not path.is_file():
-            raise InputError(f"model file not found: {path}")
-        with path.open("rb") as file:
-            bundle = pickle.load(file)
+    bundle = model if isinstance(model, dict) else read_model(model)
     if not isinstance(bundle, dict) or any(key not in bundle for key in _BUNDLE_KEYS):
         raise InputError(f"the model must be a dict with the keys {', '.join(_BUNDLE_KEYS)} (a model.pkl of mloom)")
     return bundle

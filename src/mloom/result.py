@@ -1,12 +1,11 @@
-"""The result of a run and how it is saved (``model.pkl`` and ``run.json``).
+"""The result of a run: its record and its model, saved together as ``model.pkl``.
 
-``model.pkl`` holds a dict of plain Python values, numpy arrays and
-scikit-learn parts only, so that it can be read without mloom (see
-"``model.pkl``" in ``docs/spec.md``).
+The record holds plain Python values only, and the model a dict of plain
+Python values, numpy arrays and scikit-learn parts only, so that both can be
+read without mloom (see "``model.pkl``" in ``docs/spec.md``; the format of the
+file is ``mloom.model_file``).
 """
 
-import json
-import pickle
 import platform
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -18,19 +17,18 @@ from sklearn.pipeline import Pipeline
 
 from mloom.columns import ColumnPlan
 from mloom.config import Config
+from mloom.model_file import write_model_file
 from mloom.row_hash import hash_columns
 from mloom.sensors import UnavailableSensors
 from mloom.settings import Settings
 from mloom.training_period import TimeValue
 
-MODEL_FILE = "model.pkl"
-RUN_FILE = "run.json"
 _PACKAGES = ("mloom", "scikit-learn", "optuna", "polars", "numpy", "scipy")
 
 
 @dataclass(frozen=True)
 class DataSummary:
-    """The input data, as recorded in ``run.json``.
+    """The input data, as recorded in the record of the run.
 
     Parameters
     ----------
@@ -133,12 +131,12 @@ class Result:
     shap_background: np.ndarray
 
     def to_dict(self) -> dict[str, Any]:
-        """Build the content of ``run.json``.
+        """Build the record of the run, the first pickle of ``model.pkl``.
 
         Returns
         -------
         dict[str, Any]
-            JSON-serializable record of the run.
+            JSON-serializable record of the run (see "記録" in ``docs/spec.md``).
         """
         config = self.config
         return {
@@ -172,7 +170,7 @@ class Result:
         }
 
     def model_bundle(self) -> dict[str, Any]:
-        """Build the content of ``model.pkl``.
+        """Build the model, the second pickle of ``model.pkl``.
 
         Returns
         -------
@@ -197,26 +195,22 @@ class Result:
         }
 
     def save(self, output_dir: str | Path) -> Path:
-        """Save ``model.pkl`` and ``run.json``.
+        """Save the record and the model as ``model.pkl``.
 
         Parameters
         ----------
         output_dir : str | Path
-            Directory to write to; created when missing. Existing files are
-            overwritten.
+            Directory to write to; created when missing. An existing
+            ``model.pkl`` is replaced only once the new one is fully written.
 
         Returns
         -------
         Path
-            Path of ``run.json``.
+            Path of ``model.pkl``.
         """
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
-        with (directory / MODEL_FILE).open("wb") as file:
-            pickle.dump(self.model_bundle(), file)
-        run_path = directory / RUN_FILE
-        run_path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return run_path
+        return write_model_file(directory, self.to_dict(), self.model_bundle())
 
 
 def _versions() -> dict[str, str | None]:

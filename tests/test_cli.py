@@ -1,12 +1,14 @@
 """Tests of the ``mloom`` command line."""
 
 import json
+import pickle
 from pathlib import Path
 
 import polars as pl
 import pytest
 
 import mloom.optimize
+from mloom import read_run
 from mloom.cli import EXIT_INPUT, EXIT_OK, main
 from mloom.prediction import predict
 
@@ -35,26 +37,33 @@ def _args(data_path: Path, output: Path, *extra: str) -> list[str]:
     ]  # fmt: skip
 
 
-def test_optimize_saves_and_prints_run_json(
+def test_optimize_saves_and_prints_model_pkl(
     data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """On success, model.pkl and run.json are saved and stdout ends with the path of run.json."""
+    """On success, model.pkl is saved and stdout ends with its path; ``show`` prints its record as JSON."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "unavailable-sensors.json").write_text('{"sensors": [{"name": "s0"}]}', encoding="utf-8")
+    (tmp_path / "config" / "unavailable-sensors.json").write_text(
+        '{"sensors": [{"name": "s0", "reason": "校正切れ"}]}', encoding="utf-8"
+    )
     (tmp_path / "config" / "mloom.toml").write_text("[columns]\nmax_missing_rate = 0.3\n", encoding="utf-8")
     output = tmp_path / "out"
 
     assert main(_args(data_path, output)) == EXIT_OK
 
-    run_path = Path(capsys.readouterr().out.strip().splitlines()[-1])
-    assert run_path == output / "run.json"
-    assert (output / "model.pkl").is_file()
+    model_path = Path(capsys.readouterr().out.strip().splitlines()[-1])
+    assert model_path == output / "model.pkl"
+    assert [path.name for path in output.iterdir()] == ["model.pkl"]
     # The default unavailable-sensors.json and mloom.toml are read from the current directory.
-    run = json.loads(run_path.read_text(encoding="utf-8"))
+    run = read_run(model_path)
     assert run["unavailable_sensors"]["found"]
     assert "s0" not in run["candidate_columns"]
     assert run["settings"]["columns"]["max_missing_rate"] == 0.3
+
+    assert main(["show", str(model_path)]) == EXIT_OK
+    shown = capsys.readouterr().out
+    assert json.loads(shown) == run
+    assert "校正切れ" in shown  # not escaped
 
 
 def test_invalid_input_exits_with_2(data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -109,7 +118,7 @@ def test_predict_saves_what_the_api_returns(
     """``optimize --filters`` then ``predict`` save the result of ``mloom.predict``; stdout ends with its path."""
     model_dir = tmp_path / "model"
     assert main(_args(data_path, model_dir, "--filters", str(filters_path))) == EXIT_OK
-    run = json.loads((model_dir / "run.json").read_text(encoding="utf-8"))
+    run = read_run(model_dir / "model.pkl")
     assert run["filters"] == json.loads(filters_path.read_text(encoding="utf-8"))["filters"]
     assert run["data"]["n_rows_train_filtered_out"] > 0
     capsys.readouterr()
@@ -159,6 +168,42 @@ def test_invalid_predict_input_exits_with_2(
     assert main([*command, "--keep-columns", "nope"]) == EXIT_INPUT
     assert "['nope'] not in the data" in capsys.readouterr().err
     assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("pickles", "message"),
+    [
+        (None, "model file not found"),
+        ([dict.fromkeys(("pipeline", "filters", "train_filters", "training_rows", "shap_background"))], "make it again"),
+        ([[1]], "does not start with the record of the run"),
+    ],
+    ids=["missing", "without a record", "not a dict"],
+)
+def test_show_and_predict_of_an_invalid_model_exit_with_2(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], pickles: list | None, message: str
+) -> None:
+    """``show`` and ``predict`` of a file without the record of the run exit with code 2 and save nothing."""
+    path = tmp_path / "model.pkl"
+    if pickles is not None:
+        path.write_bytes(b"".join(pickle.dumps(content) for content in pickles))
+    output = tmp_path / "predictions.parquet"
+    assert main(["show", str(path)]) == EXIT_INPUT
+    assert message in capsys.readouterr().err
+    assert main(["predict", str(path), str(data_path), "--output", str(output)]) == EXIT_INPUT
+    assert message in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_show_reads_a_record_without_a_model_but_predict_does_not(
+    data_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file with only the record of the run is shown, but ``predict`` exits with code 2."""
+    path = tmp_path / "model.pkl"
+    path.write_bytes(pickle.dumps({"mloom_version": "0.0.0"}))
+    assert main(["show", str(path)]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out) == {"mloom_version": "0.0.0"}
+    assert main(["predict", str(path), str(data_path), "--output", str(tmp_path / "p.parquet")]) == EXIT_INPUT
+    assert "has no model after the record of the run" in capsys.readouterr().err
 
 
 @pytest.fixture

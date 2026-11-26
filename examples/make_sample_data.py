@@ -4,7 +4,7 @@ The data has hourly rows over 30 lots, 30 sensors (``TI-101`` to
 ``TI-130``), a constant sensor, a mostly missing sensor, a text column, a
 numeric target ``quality``, and a class target ``grade``. ``TI-101`` drives
 the targets most and is listed in ``examples/unavailable-sensors.json``, so
-its exclusion is visible in ``run.json``.
+its exclusion is visible in the record of the run (``mloom show``).
 
 Usage: ``uv run examples/make_sample_data.py [output]`` (default
 ``data/sample.parquet``).

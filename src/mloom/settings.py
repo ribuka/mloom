@@ -218,7 +218,7 @@ class Settings:
     files: list[SettingsFile]
 
     def to_dict(self) -> dict[str, Any]:
-        """Describe the settings for ``run.json``.
+        """Describe the settings for the record of the run.
 
         Returns
         -------
