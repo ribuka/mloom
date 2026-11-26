@@ -1,17 +1,21 @@
-"""The base model of ``mloom refit``: reading how it was made, and keeping it from being overwritten.
+"""The base model of ``mloom refit`` and ``mloom optimize --base``: how it was made, as a new run sees it.
 
-See "ベースのモデル" in ``docs/spec.md``. Only the record of the run (the first
-pickle of ``model.pkl``) is read, so that a base whose model can no longer be
-read (with another version of scikit-learn, for example) can still be
-refitted. A record made by another version of mloom is read when it has every
+That is: reading how it was made, which of its columns a new run can still
+use, how the record of the new run describes it, and keeping it from being
+overwritten. See "ベースのモデル" in ``docs/spec.md``. Only the record of the
+run (the first pickle of ``model.pkl``) is read, so that a base whose model
+can no longer be read (with another version of scikit-learn, for example) can
+still be refitted. A record made by another version of mloom is read when it has every
 key the base needs, with valid values; an older form is never converted
 (``AGENTS.md``).
 """
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mloom.columns import ColumnPlan
 from mloom.config import Config
 from mloom.errors import InputError
 from mloom.model_file import MODEL_FILE, read_run
@@ -19,6 +23,8 @@ from mloom.models import K_PARAM
 from mloom.settings import Settings, settings_from_record
 
 _NONE = type(None)
+# The reason a column of the base is dropped when the new data has no such column.
+NOT_IN_DATA = "not_in_data"
 
 
 @dataclass(frozen=True)
@@ -171,3 +177,76 @@ def check_output(output_dir: str | Path, base: str | Path) -> None:
     same_path = output.resolve() == base.resolve()
     if same_path or (output.is_file() and base.is_file() and output.samefile(base)):
         raise InputError(f"saving to {output_dir} would overwrite the base {base}; save to another directory")
+
+
+def base_columns(base: Base, plan: ColumnPlan) -> tuple[list[int], list[dict[str, Any]]]:
+    """Find the columns of the base that are still candidates, and why the others are not.
+
+    Parameters
+    ----------
+    base : Base
+        The base.
+    plan : ColumnPlan
+        The candidate and excluded columns of the new run.
+
+    Returns
+    -------
+    tuple[list[int], list[dict[str, Any]]]
+        The positions among ``plan.candidates`` of the columns of the base
+        that are candidates, in the order of the base; and each other column
+        of the base as ``{"name": ..., "reason": ...}``, its reason being that
+        of ``plan.excluded``, or ``"not_in_data"`` when the data has no such
+        column. Either may be empty.
+    """
+    position = {name: i for i, name in enumerate(plan.candidates)}
+    reasons = {column.name: column.reason for column in plan.excluded}
+    keep: list[int] = []
+    dropped: list[dict[str, Any]] = []
+    for name in base.selected_columns:
+        if name in position:
+            keep.append(position[name])
+        else:
+            dropped.append({"name": name, "reason": reasons.get(name, NOT_IN_DATA)})
+    return keep, dropped
+
+
+def warn_dropped(dropped: list[dict[str, Any]]) -> None:
+    """Warn of each column of the base that is dropped (``warnings.warn``).
+
+    Parameters
+    ----------
+    dropped : list[dict[str, Any]]
+        The dropped columns (``base_columns``).
+    """
+    for column in dropped:
+        warnings.warn(
+            f"column {column['name']!r} of the base is dropped: {column['reason']}", UserWarning, stacklevel=3
+        )
+
+
+def describe_base(base: Base, mode: str, dropped: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe the base for ``base`` of the record of the new run.
+
+    Parameters
+    ----------
+    base : Base
+        The base.
+    mode : str
+        How the new run used the base: ``"refit"`` or ``"optimize"``.
+    dropped : list[dict[str, Any]]
+        The columns of the base that are dropped (``base_columns``).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``path``, ``mode``, ``created_at``, ``mloom_version``, ``cv_scores``
+        and ``dropped_columns``; ``optimize_model`` adds its own keys.
+    """
+    return {
+        "path": str(base.path),
+        "mode": mode,
+        "created_at": base.record["created_at"],
+        "mloom_version": base.record["mloom_version"],
+        "cv_scores": base.record["cv_scores"],
+        "dropped_columns": dropped,
+    }

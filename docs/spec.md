@@ -1100,7 +1100,8 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.selection` | 特徴量選択：相関の高い列のクラスタ（CV の前に 1 回）と、その代表のランク付け（Pipeline の外で、分割ごとに 1 回）、記録の `selection` |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
 | `mloom.refit` | `refit_model`：ベースの列とパラメータを固定した、探索しない再学習 |
-| `mloom.base` | ベースの `model.pkl` の記録の読み込み（`load_base`）と、ベースを上書きしない確認（`check_output`） |
+| `mloom.base` | ベースの `model.pkl` を新しい実行から見たもの：記録の読み込み（`load_base`）、ベースの採用した列のうち今回の候補列にあるものと外した列の理由（`base_columns`・`warn_dropped`）、記録の `base` の共通のキー（`describe_base`）、ベースを上書きしない確認（`check_output`） |
+| `mloom.fixed_cv` | 列とパラメータを固定したモデルの、実行の CV の分割でのスコア（refit と、`optimize --base` のベースの評価）。2026-11-26、Issue #17 で `mloom.refit` から切り出した |
 | `mloom.training` | `optimize_model` と refit が共有する処理：行のフィルタ・行の選択・列の除外・CV の分割までの準備（`prepare_training`）と、最終学習と `Result` の組み立て（`fit_final`）。2026-11-26、Issue #16 で `mloom.optimize` から切り出した |
 | `mloom.result` | `Result`（記録とモデルの組み立て）と保存 |
 | `mloom.model_file` | `model.pkl` の形（1 段目の記録、2 段目のモデル）の書き出しと読み込み（`read_run`）。scikit-learn と numpy を import しない |
