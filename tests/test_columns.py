@@ -6,7 +6,12 @@ import numpy as np
 import polars as pl
 import pytest
 
-from mloom.columns import check_columns, check_role_values, plan_columns
+from mloom.columns import (
+    check_columns,
+    check_role_values,
+    plan_columns,
+    require_candidates,
+)
 from mloom.config import Config
 from mloom.errors import InputError
 from mloom.sensors import UnavailableSensors
@@ -97,8 +102,10 @@ def test_infinite_values_count_as_missing(frame: pl.DataFrame, make_config: Call
 def test_no_candidate_raises(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
     """When every column is excluded, ``InputError`` is raised."""
     config = make_config(exclude_columns=("t", "s0", "s1", "s2", "s3", "s4", "s5", "c"))
+    plan = plan_columns(frame, frame.clear(), config, NO_SENSORS, 0.5)
+    assert plan.candidates == []
     with pytest.raises(InputError, match="no column is left"):
-        plan_columns(frame, frame.clear(), config, NO_SENSORS, 0.5)
+        require_candidates(plan)
 
 
 @pytest.mark.parametrize(

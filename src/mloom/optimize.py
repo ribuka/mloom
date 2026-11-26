@@ -11,6 +11,7 @@ import optuna
 from sklearn.metrics import get_scorer
 from sklearn.pipeline import Pipeline
 
+from mloom.columns import require_candidates
 from mloom.config import Config
 from mloom.data import Data
 from mloom.errors import OptimizationError
@@ -56,7 +57,7 @@ def optimize_model(data: Data, config: Config) -> Result:
     OptimizationError
         When no trial of the search finished with a score.
     """
-    training = prepare_training(data, config, load_settings(config.settings))
+    training = prepare_training(data, config, load_settings(config.settings), require_candidates)
     # The clusters do not use the target, so they come from the statistic rows of the whole period.
     clusters = correlation_clusters(training.x_statistics, training.settings.selection.max_correlation)
 

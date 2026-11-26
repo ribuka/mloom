@@ -13,6 +13,7 @@ from typing import Any
 from sklearn.metrics import get_scorer
 
 from mloom.base import Base
+from mloom.columns import require_candidates
 from mloom.config import DEFAULT_UNAVAILABLE_SENSORS
 from mloom.data import Data
 from mloom.errors import InputError
@@ -85,7 +86,8 @@ def refit_model(
         unavailable_sensors=unavailable_sensors,
         settings=settings,
     )
-    training = prepare_training(data, config, base.settings if settings is None else load_settings(settings))
+    run_settings = base.settings if settings is None else load_settings(settings)
+    training = prepare_training(data, config, run_settings, require_candidates)
     keep, dropped = _keep(base, training)
     params = {name: value for name, value in base.best_params.items() if name != K_PARAM}
     cv_plan = training.cv_plan

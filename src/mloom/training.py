@@ -7,6 +7,7 @@ Only what lies between differs: the search of ``optimize_model``, and the
 fixed columns and parameters of ``refit_model``.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -107,7 +108,9 @@ class TrainingData:
         return np.vstack([self.x[train], self.x_unlabeled[unlabeled]])
 
 
-def prepare_training(data: Data, config: Config, settings: Settings) -> TrainingData:
+def prepare_training(
+    data: Data, config: Config, settings: Settings, check_plan: Callable[[ColumnPlan], object]
+) -> TrainingData:
     """Read the data and apply the filters, the selection of the rows, the exclusion of columns and the CV split.
 
     Parameters
@@ -118,6 +121,10 @@ def prepare_training(data: Data, config: Config, settings: Settings) -> Training
         The config of the run; its ``unavailable_sensors`` is read here.
     settings : Settings
         The settings of the run.
+    check_plan : Callable[[ColumnPlan], object]
+        Checks the feature candidates as soon as they are decided, and
+        raises ``InputError`` when the run cannot go on with them (such as
+        ``mloom.columns.require_candidates``). What it returns is not used.
 
     Returns
     -------
@@ -148,6 +155,7 @@ def prepare_training(data: Data, config: Config, settings: Settings) -> Training
     rows = order_rows(training.labeled, config)
     y = _target(rows, config)
     columns = plan_columns(rows, training.unlabeled, config, sensors, settings.columns.max_missing_rate)
+    check_plan(columns)
     x = to_matrix(rows, columns.candidates)
     x_unlabeled = to_matrix(training.unlabeled, columns.candidates)
     return TrainingData(

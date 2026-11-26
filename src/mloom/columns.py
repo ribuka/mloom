@@ -125,12 +125,8 @@ def plan_columns(
     Returns
     -------
     ColumnPlan
-        The candidates and the excluded columns with their reasons.
-
-    Raises
-    ------
-    InputError
-        When no column is left as a candidate.
+        The candidates and the excluded columns with their reasons. The
+        candidates may be empty (``require_candidates``).
     """
     candidates: list[str] = []
     excluded: list[ExcludedColumn] = []
@@ -140,10 +136,25 @@ def plan_columns(
             candidates.append(name)
         else:
             excluded.append(reason)
-    if not candidates:
-        raise InputError("no column is left as a feature candidate")
     not_in_data = [name for name in sensors.reasons if name not in frame.columns]
     return ColumnPlan(candidates=candidates, excluded=excluded, sensors_not_in_data=not_in_data)
+
+
+def require_candidates(plan: ColumnPlan) -> None:
+    """Check that a column is left as a feature candidate.
+
+    Parameters
+    ----------
+    plan : ColumnPlan
+        The plan from ``plan_columns``.
+
+    Raises
+    ------
+    InputError
+        When no column is left as a candidate.
+    """
+    if not plan.candidates:
+        raise InputError("no column is left as a feature candidate")
 
 
 def name_reason(name: str, config: Config, sensors: UnavailableSensors) -> ExcludedColumn | None:
