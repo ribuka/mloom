@@ -254,3 +254,39 @@ def candidate_columns(pipeline: Pipeline) -> list[str]:
         The feature candidates, in the order of the matrix.
     """
     return list(pipeline.named_steps["columns"].transformers[0][2])
+
+
+def selected_columns(pipeline: Pipeline) -> list[str]:
+    """Tell the columns the estimator of a saved pipeline takes.
+
+    Parameters
+    ----------
+    pipeline : Pipeline
+        A pipeline built with ``columns``.
+
+    Returns
+    -------
+    list[str]
+        The kept candidate columns, in the order of the estimator's input.
+    """
+    candidates = candidate_columns(pipeline)
+    return [candidates[i] for i in pipeline.named_steps["select"].transformers[0][2]]
+
+
+def estimator_input(pipeline: Pipeline, frame: pl.DataFrame) -> np.ndarray:
+    """Turn a table into the input of the estimator of a saved pipeline.
+
+    Parameters
+    ----------
+    pipeline : Pipeline
+        A fitted pipeline built with ``columns``.
+    frame : pl.DataFrame
+        Data that has every candidate column.
+
+    Returns
+    -------
+    np.ndarray
+        The values after the preprocessing and the selection of the kept
+        columns, of shape ``(frame.height, len(selected_columns(pipeline)))``.
+    """
+    return np.asarray(pipeline[:-1].transform(frame), dtype=np.float64)

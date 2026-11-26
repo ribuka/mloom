@@ -21,6 +21,7 @@ from mloom.config import (
     Config,
 )
 from mloom.errors import InputError
+from mloom.evaluation import POSITIVE_SIDES
 from mloom.filters import load_filters
 from mloom.metrics import METRICS
 from mloom.models import MODELS
@@ -85,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("data", type=Path, help="Parquet file")
     predict_parser.add_argument("--output", required=True, type=Path, help="Parquet file of the predictions")
     predict_parser.add_argument("--keep-columns", nargs="*", default=[], metavar="COL", help="input columns to copy")
+    predict_parser.add_argument("--shap", action="store_true", help="add the SHAP contributions of the selected columns")
+    predict_parser.add_argument("--cm-actual-threshold", type=float, help="threshold of the target (regression)")
+    predict_parser.add_argument(
+        "--cm-predicted-threshold",
+        type=float,
+        help="threshold of the prediction (regression) or of the probability of --positive-class (default: 0.5)",
+    )
+    predict_parser.add_argument("--cm-positive", choices=POSITIVE_SIDES, help="side of the thresholds that is positive")
+    predict_parser.add_argument("--positive-class", help="positive class of the confusion matrix (classification)")
     return parser
 
 
@@ -163,7 +173,16 @@ def _optimize(args: argparse.Namespace) -> Path:
 
 
 def _predict(args: argparse.Namespace) -> Path:
-    predictions = predict(args.model, args.data, keep_columns=tuple(args.keep_columns))
+    predictions = predict(
+        args.model,
+        args.data,
+        keep_columns=tuple(args.keep_columns),
+        shap=args.shap,
+        cm_actual_threshold=args.cm_actual_threshold,
+        cm_predicted_threshold=args.cm_predicted_threshold,
+        cm_positive=args.cm_positive,
+        positive_class=args.positive_class,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     predictions.write_parquet(args.output)
     print(f"{predictions.height} rows predicted; {predictions[PASSED_FILTER].sum()} passed the filters", file=sys.stderr)

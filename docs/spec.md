@@ -7,6 +7,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 - 案のまま、試しに動かせるたたき台を実装した（2026-11-26、v0.1.0）。実装で値を決めた箇所は、その旨を書いている。
 - たたき台の実装の後に、未決 8・10・12・13・16・18 を決め、行のフィルタ、クリップ、補完の方式の選択、`hist_gradient_boosting` を足すことを決めた（2026-11-26 ユーザー判断）。まだ実装していない箇所には「（未実装）」と書き、実装は後続の PR で行う。
 - そのうち、行のフィルタ、mloom に依存しない `model.pkl`、`mloom predict` の基本（スコア・混同行列・SHAP を除く）を実装した（2026-11-26、Issue #4）。
+- `mloom predict` のスコア・混同行列・SHAP の寄与を実装した（2026-11-26、Issue #6）。
 
 ## 要件
 
@@ -28,7 +29,7 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 | 勾配ブースティング | LightGBM をやめ、scikit-learn の `HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`（`hist_gradient_boosting`）に置き換える（2026-11-26 ユーザー判断。2026-11-26 に実装） | `model.pkl` を読む環境に lightgbm を要らなくするため。同じヒストグラム型の勾配ブースティングで、欠損をそのまま扱える。結果は LightGBM と一致しない（サンプルデータの時系列 5 分割で、既定値の RMSE は LightGBM 3.450、HistGradientBoosting 3.487）。行のサブサンプリング（LightGBM の `subsample`）は無い |
 | 出力 | 学習済みの Pipeline 全体と行のフィルタの定義を `model.pkl` に、実行の記録を `run.json` に保存する | モデル本体だけを保存すると、予測する側で列の選択や欠損補完を再現する必要がある。Pipeline ごと保存すれば同じ処理を通せる |
 | `model.pkl` の依存 | `model.pkl` は mloom が無い環境でも読めるようにする。Pipeline には scikit-learn・numpy などの部品と関数だけを入れ、mloom のクラスや関数を入れない（2026-11-26 ユーザー判断。未決 16） | 予測する環境に mloom を入れなくて済むようにするため |
-| 予測の入口 | `pickle.load` に加えて、`mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 ユーザー判断。未決 10。スコア・混同行列・SHAP は未実装） | フィルタの適用と、フィルタの外の行を NaN にする処理を 1 か所にまとめ、Skill から予測まで実行できるようにするため |
+| 予測の入口 | `pickle.load` に加えて、`mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 ユーザー判断。未決 10。スコア・混同行列・SHAP は 2026-11-26 に Issue #6 で実装） | フィルタの適用と、フィルタの外の行を NaN にする処理を 1 か所にまとめ、Skill から予測まで実行できるようにするため |
 | 行のフィルタ | 列と値の条件で、学習と予測に使う行を絞れる。条件は AND だけで、定義を `model.pkl` と `run.json` に残す（2026-11-26 ユーザー判断。「行のフィルタ」） | 運転条件などで、モデルを使う範囲を決めるため |
 | 前処理の方式 | 説明変数のクリップと補完の方式を、設定ファイルで選べる（2026-11-26 ユーザー判断。2026-11-26 に実装。「前処理」） | データによって適した前処理が違うため |
 | 本体の形 | 処理の本体は決定論的な Python コードにする。Skill は「ユーザーの指定を CLI の引数に変換し、結果を説明する」だけにする | どの列を除外するか、どう評価するか、何を保存するかを、実行のたびに変わらないようにするため |
@@ -488,24 +489,32 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
         "time_column": "timestamp",  # 指定しなければ None
         "group_column": None,        # 指定しなければ None
         "hashes": numpy.ndarray,     # 最終モデルの学習に使った行のハッシュ（uint64、昇順で重複なし）
+        "last_time": datetime(...),  # 最終モデルの学習に使った行の time_column の最大値。指定しなければ None
     },
+    "shap_background": numpy.ndarray,  # 線形の SHAP の基準（「SHAP の寄与」）
 }
 ```
 
-- `training_rows` に `target`・`time_column`・`group_column` の名前を入れる（2026-11-26 実装で決定）。予測では目的変数の列があるかで `used_for_training` を null にするかを決め、スコア（未実装）では `time_column` が要るため。`columns` の位置からは、`time_column` と `group_column` の片方だけを指定した実行で、どちらなのかを区別できない。
-- 最も新しい時刻（`last_time`）は、スコアを実装するときに `training_rows` に足す（未実装）。
+- `training_rows` に `target`・`time_column`・`group_column` の名前を入れる（2026-11-26 実装で決定）。予測では目的変数の列があるかで `used_for_training` を null にするかを決め、スコアでは `time_column` が要るため。`columns` の位置からは、`time_column` と `group_column` の片方だけを指定した実行で、どちらなのかを区別できない。
+- `last_time`（2026-11-26 に Issue #6 で実装、`mloom.training_period`）は、最終モデルの学習に使った行の `time_column` の最大値。polars から取り出した Python の値（`datetime`・`date`・`int`・`float`・`bool`・`str`）なので、pickle の依存は増えない。`time_column` を指定していない実行では `None`。スコアの対象の行（「スコア」）を決めるのに使う。
+  - `time_column` の型は限らない（行のハッシュが扱える数値・真偽値・文字列・日時・日付なら学習できる）。値は、`timeseries` の CV が行を並べる順（polars の順）で比べる。文字列（`Categorical`・`Enum` は文字列にしてから）は文字の順で比べる（2026-11-26 実装で決定）。ISO 8601 の文字列の時刻で学習する使い方を止めないため。また、CV の並びと「学習期間の後」がずれないようにするため。
+  - 日時は、マイクロ秒の単位に変換してから最大値をとる。予測時も、入力の列をマイクロ秒に変換してから比べる（2026-11-26 実装で決定）。Python の `datetime` はマイクロ秒までしか持てない。ns の列の最大値をそのまま取り出すと、マイクロ秒未満が落ちて、最後の学習行が `last_time` より「後」になってしまう。両側に同じ変換をかけるので、学習に使った行が後になることはない。代わりに、最後の学習行と同じマイクロ秒の中の行は、学習に使っていなくても対象から外れる（行のハッシュもマイクロ秒で比べる）。
+  - タイムゾーン付きの列では、`last_time` を UTC の `datetime`（`datetime.UTC`）にする。タイムゾーンのデータベースに依らずに読めるようにするため。
+  - 予測時に、入力の `time_column` の値の種類（数値・真偽値・文字列・日時・日付）が `last_time` と違うとき、または日時のタイムゾーンの有無が違うときは、`InputError`（終了コード 2）で止める。整数の列と浮動小数の列のように、種類が同じなら比べる。
+  - `time_column` が null か NaN の行は、学習期間の後の行にしない。
+- `shap_background`（2026-11-26 に Issue #6 で実装）は、最終モデルの学習に使った行の、推定器への入力（前処理と、採用した列の選択の後の値）の列ごとの平均（numpy の配列）。欠損は除いて平均する（欠損を扱えるモデルは補完しないことがあるため。基準は線形のモデルにだけ使い、線形のモデルは必ず補完する）。予測時には学習データが無いので、線形の SHAP の基準を `model.pkl` に入れる。
 - `Result.pipeline` は Pipeline を返す。`Result.model_bundle()` が上の辞書を作り、`Result.save` がそれを `model.pkl` に保存する。
 - mloom を使わずに予測する手順（README に書いた）: `pickle.load` → `filters` の条件を AND で評価 → 条件を満たす行だけ `pipeline.predict` → 満たさない行は NaN。条件を満たす行が 0 行なら `predict` を呼ばない（scikit-learn は 0 行の表でエラーになるため）。
 
 ### 予測
 
-決定事項（2026-11-26 ユーザー判断。未決 10）: `mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 に実装、`mloom.prediction`。スコア・混同行列・SHAP は未実装）。
+決定事項（2026-11-26 ユーザー判断。未決 10）: `mloom predict` の CLI と、同じ処理の Python API を用意する（2026-11-26 に実装、`mloom.prediction`。スコア・混同行列・SHAP は同日に Issue #6 で実装）。
 
 - 処理: `model.pkl` を読み、フィルタを適用し、条件を満たす行だけを予測し、満たさない行は NaN にして、入力と同じ行数・同じ順で返す。
 - 説明変数の無限大は Pipeline の中で欠損になるので、予測の入口では特別に扱わない（「行の除外」。2026-11-26 に実装。その行にも予測値が返る）。
 - この入口を使う環境には mloom が要る。`model.pkl` 自体は mloom なしでも読める。
 
-出力の列（2026-11-26 ユーザー判断。未決 20）。列の順は、`--keep-columns` の列 → `prediction` → `passed_filter` → `used_for_training` → `proba_<クラス>`（`pipeline.classes_` の順、クラス名は `str()`）。入力を確かめる列が先にあると読みやすいため。スコア・混同行列・SHAP の列（未実装）は、その後ろに足す。
+出力の列（2026-11-26 ユーザー判断。未決 20）。列の順は、`--keep-columns` の列 → `prediction` → `passed_filter` → `used_for_training` → `proba_<クラス>`（`pipeline.classes_` の順、クラス名は `str()`）。入力を確かめる列が先にあると読みやすいため。その後ろに、`error`・`rmse`・`r2`（回帰のとき）→ `cm`・`accuracy`・`precision`・`recall`（閾値を与えたとき）→ `shap_base`（多値分類では `shap_base_<クラス>`）と `shap_*`（`--shap` を付けたとき）の順で続ける（2026-11-26 Issue #6 で決定）。
 
 | 列 | 内容 | 出す条件 |
 | --- | --- | --- |
@@ -514,11 +523,11 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
 | `passed_filter` | フィルタの条件を満たしたか（bool）。予測値が NaN の理由が、フィルタの外だからかどうかを見分けるため | 常に |
 | `used_for_training` | 最終モデルの学習に使った行か（bool）。予測する表に目的変数の列が無ければ null | 常に |
 | `proba_<クラス>` | 分類のクラスごとの確率（`predict_proba`）。フィルタの条件を満たさない行は NaN | 分類のとき |
-| `shap_<列名>`、`shap_base` | 採用した列（`selected_columns`）ごとの SHAP 寄与と、基準値（未実装） | `--shap` を付けたとき |
-| `error` | 予測 − 実測（「スコア」。未実装） | 回帰のとき |
-| `rmse`、`r2` | スコアの対象の行全体での RMSE と R²。全行に同じ値（「スコア」。未実装） | 回帰のとき |
-| `cm` | 混同行列のどこに入るか（`tp`・`fp`・`fn`・`tn`）（「混同行列」。未実装） | 閾値（分類では陽性のクラス）を与えたとき |
-| `accuracy`、`precision`、`recall` | スコアの対象の行全体の `cm` の数から計算した値。全行に同じ値（未実装） | 閾値（分類では陽性のクラス）を与えたとき |
+| `shap_<列名>`、`shap_base` | 採用した列（`selected_columns`）ごとの SHAP 寄与と、基準値（「SHAP の寄与」） | `--shap` を付けたとき |
+| `error` | 予測 − 実測（「スコア」） | 回帰のとき |
+| `rmse`、`r2` | スコアの対象の行全体での RMSE と R²。全行に同じ値（「スコア」） | 回帰のとき |
+| `cm` | 混同行列のどこに入るか（`tp`・`fp`・`fn`・`tn`）（「混同行列」） | 閾値（分類では陽性のクラス）を与えたとき |
+| `accuracy`、`precision`、`recall` | スコアの対象の行全体の `cm` の数から計算した値。全行に同じ値（「混同行列」） | 閾値（分類では陽性のクラス）を与えたとき |
 
 - 行数と行の順は、入力と同じ。
 - `prediction`・`proba_*` は、`passed_filter` が true の行だけで計算する。true の行が 0 行なら `predict` を呼ばず、すべての行を NaN（分類の `prediction` は null）にする（2026-11-26 実装で決定）。
@@ -526,7 +535,10 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
   - `model.pkl` が無い、または上の辞書でない。
   - 入力に候補列か `filters` の列が無い。`filters` の値が列の型に合わない（学習時と同じ検査）。`passed_filter` が決まらないため。
   - 入力に目的変数があるのに、ハッシュにする列（`time_column`・`group_column`）が無い。
-  - `--keep-columns` の列が入力に無い、出力の列と同じ名前（上書きを防ぐため）、または 2 回以上書かれている。
+  - `--keep-columns` の列が入力に無い、出力の列と同じ名前（上書きを防ぐため）、または 2 回以上書かれている。出力の列は、その呼び出しで出す列すべて（`error`・`rmse`・`r2`・`cm`・`accuracy`・`precision`・`recall`・`shap_*` を含む。2026-11-26 Issue #6 で決定）。
+  - 混同行列の引数がモデルに合わない（「混同行列」）。
+  - スコアか混同行列を出すとき（回帰のとき、または分類で `positive_class` を与えたとき）に、入力に目的変数があり、`last_time` があるのに、`time_column` の値が `last_time` と比べられない（「`model.pkl`」）。`time_column` の列が無いときは、上のハッシュにする列の検査で止まる。
+  - 回帰のモデルで、スコアを計算するとき（入力に目的変数の列があり、`last_time` があるとき）に、入力の目的変数が数値でない。
 
 学習に使った行の判定（`used_for_training`。2026-11-26 ユーザー判断）:
 
@@ -553,33 +565,39 @@ mloom が無い環境でも読める（2026-11-26 ユーザー判断。未決 16
 - ほかの型（Duration、Time、List、Binary など）の列はハッシュにできない。目的変数・`time_column`・`group_column` がそうなら、学習を始める前に `InputError`（終了コード 2）で止める（候補列は数値か真偽値だけなので当たらない）。
 - 固定した小さな表のハッシュの値を、テスト（`tests/test_row_hash.py`）で固定している。正規形を変えると、それまでに保存した `model.pkl` と照合できなくなる。
 
-SHAP の寄与（2026-11-26 ユーザー判断、未実装）:
+SHAP の寄与（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実装、`mloom.explain`）:
 
 - `--shap` を付けたときだけ出す。計算に時間がかかることがあり、列も説明変数の数だけ増えるため。
 - shap パッケージを、mloom の通常の依存にする。使うのは `mloom predict` の側だけで、`model.pkl` の依存は増えない。
-- `hist_gradient_boosting`・`random_forest` は `shap.TreeExplainer`、`ridge`・`pls` は線形の SHAP（特徴量の独立を仮定）で計算する（案）。
+- `hist_gradient_boosting`・`random_forest` は `shap.TreeExplainer`、`ridge`・`pls` は線形の SHAP（特徴量の独立を仮定）で計算する。どのモデルかは、推定器のクラスで決める（`HistGradientBoosting*`・`RandomForest*` なら木、ほかは線形）。
+- 寄与は、推定器への入力（前処理と、採用した列の選択の後の値）に対して計算し、採用した列の名前で出す。標準化するモデルでは、標準化した値の単位の寄与になる（合計は同じ）。
+- 線形の SHAP（2026-11-26 実装で決定）: 列 j の寄与は w_j ×（x_j − 基準_j）、基準値は基準の点での出力。基準は `model.pkl` の `shap_background`。重み w は、基準の点と、基準から列ごとに 1 だけ動かした点での、出力の差で求める。出力は入力の 1 次式なので、差は係数と一致する。推定器の係数の持ち方（`PLSRegression` は内部で入力を中心化し、`intercept_` は中心化した後の切片）に依らないため。出力は、回帰は `predict`、分類（`LogisticRegression`）は `decision_function`。
+- shap は `import` を `--shap` のときの計算の中だけで行う（2026-11-26 実装。`--shap` なしでは import しないことをテストで確認）。
+- 2 値分類は `classes_[1]` に対する値だけを出す（列が 2 倍に増えるのを防ぐため。もう一方のクラスは符号が逆になるだけ）。
 - 2026-11-26 に shap 0.54.1・scikit-learn 1.9.1・numpy 2.5.5 で確かめたこと（欠損が 10% のデータ）:
   - `TreeExplainer` は、`HistGradientBoostingRegressor`・`HistGradientBoostingClassifier`・`RandomForestRegressor` で動いた。
   - 基準値と寄与の合計は、予測値（分類は `decision_function` の対数オッズ）と、1e-13 程度の誤差で一致した。
-  - 1000 行にかかった時間は、`HistGradientBoosting` が約 1.5 秒、`RandomForest`（木 100 本、深さの制限なし）が約 52 秒。
-- 列は、採用した列ごとの `shap_<列名>` と、基準値の `shap_base`。採用されなかった列は、寄与が常に 0 なので出さない。
-- 分類の寄与の単位は、モデルによって違う（対数オッズか確率か）。多値分類では、クラスごとに列を出す（`shap_<クラス>_<列名>`）。
+  - 1000 行にかかった時間は、`HistGradientBoosting` が約 1.5 秒、`RandomForest`（木 100 本、深さの制限なし）が約 52 秒。`random_forest` が遅いことは受け入れる。`--shap` を付けたときだけ計算するので、既定の予測は遅くならない。
+- 2026-11-26 に shap 0.54.1・scikit-learn 1.9.1 で確かめた `TreeExplainer.shap_values` の形（行 × 列 × クラス）: `HistGradientBoostingRegressor`・`RandomForestRegressor` と 2 値の `HistGradientBoostingClassifier` は（行, 列）で `expected_value` は 1 つ。多値の `HistGradientBoostingClassifier` は（行, 列, クラス）。`RandomForestClassifier` は 2 値でも（行, 列, クラス）なので、2 値では `classes_[1]` の側を取る。
+- 2026-11-26 に、4 つのモデルとタスク（回帰、2 値分類、3 値分類。`pls` は回帰だけ）の 10 の組み合わせで、行ごとの基準値と寄与の合計が、そのモデルの出力と 1e-6 以内で一致することをテストで確かめた（`tests/test_predict.py`）。
+- 列は、採用した列ごとの `shap_<列名>` と、基準値の `shap_base`。採用されなかった列は、寄与が常に 0 なので出さない。列の順は、`shap_base`、`selected_columns` の順の `shap_<列名>`。
+- 分類の寄与の単位は、モデルによって違う（対数オッズか確率か）。多値分類では、クラスごとに列を出す（`classes_` の順に、`shap_base_<クラス>`、`shap_<クラス>_<列名>`。クラス名は `str()`）。
 - フィルタの外の行は、SHAP の列も NaN にする。
 
-スコア（2026-11-26 ユーザー判断、未実装。列の名前は案）:
+スコア（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実装、`mloom.evaluation`）:
 
 - 回帰では、`error`（予測 − 実測）、`rmse`、`r2` を標準で出す。`rmse` と `r2` は、スコアの対象の行全体で 1 つの値で、全行に同じ値を入れる。
   - `error` の向きを「予測 − 実測」にしたのは、ユーザーの言い方に合わせたため（統計でいう残差は逆の向き）。プラスなら予測が過大。
 - スコアの対象の行は、時刻が「最終モデルの学習に使った行の最も新しい時刻」より後の行だけ。その時刻と同じか、それより前の行は、`error`・`cm` を None にし、`rmse` などの計算にも入れない。学習期間の中の行で測ると、成績が良く見えすぎるため。
-  - 最も新しい時刻は、学習時に `model.pkl` に保存する（キーの名前は案。`training_rows` の中の `last_time`）。
+  - 最も新しい時刻は、学習時に `model.pkl` に保存する（`training_rows` の中の `last_time`。「`model.pkl`」）。
   - 同じ時刻の行を含めないのは、最も新しい時刻の行は学習に使った行だから。
   - 時刻の列は `time_column`。`time_column` を指定していない実行（`kfold`・`group` の CV など）では、「学習期間の後」が決められないので、スコアと混同行列の列をすべて None にする（2026-11-26 ユーザー判断）。
 - 時刻が後でも、実測（目的変数）が欠損か無限大の行、フィルタの外で予測値が NaN の行は、`error`・`cm` を None にし、計算にも入れない。
-- 予測する表に目的変数の列が無いときは、スコアと混同行列の列をすべて None にする。
-- 対象の行が 0 行なら `rmse`・`r2` は None。1 行だけなら `r2` は None（案。R² は 2 行以上ないと計算できないため）。
+- 予測する表に目的変数の列が無いときは、スコアと混同行列の列をすべて None にする。このときは `time_column` の列が無くてもよい（`used_for_training` と同じ。新しいデータには、目的変数の列も時刻の列も無いことがあるため）。
+- 対象の行が 0 行なら `rmse`・`r2` は None。1 行だけなら `r2` は None（R² は 2 行以上ないと計算できないため）。`rmse` は `sklearn.metrics.root_mean_squared_error`、`r2` は `sklearn.metrics.r2_score` で計算する。
 - 分類では、`error`・`rmse`・`r2` を出さない（2026-11-26 ユーザー判断）。分類の成績は「混同行列」で見る。
 
-混同行列（2026-11-26 ユーザー判断、未実装。列と引数の名前は案）:
+混同行列（2026-11-26 ユーザー判断。2026-11-26 に Issue #6 で実装、`mloom.evaluation`）:
 
 - 閾値を与えたときだけ、`cm`・`accuracy`・`precision`・`recall` を出す。回帰でも分類でも出す。
 - 回帰: `--cm-actual-threshold 0 --cm-predicted-threshold 1 --cm-positive above` のように、実測の閾値、予測の閾値、陽性の向き（`above` か `below`）を与える。
@@ -591,6 +609,11 @@ SHAP の寄与（2026-11-26 ユーザー判断、未実装）:
   - 分類では、陽性のクラスを与えたときに出す。
 - 対象の行は、スコアと同じ（学習期間の後の行だけ）。それ以外の行の `cm` は None。
 - `accuracy` は (tp + tn) / 全数、`precision` は tp / (tp + fp)、`recall` は tp / (tp + fn)。分母が 0 なら None。
+- 引数（API は `cm_actual_threshold`・`cm_predicted_threshold`・`cm_positive`・`positive_class`）が次のときは `InputError`（終了コード 2）:
+  - 回帰で、3 つのうち一部だけを与えた。`cm_positive` が `above`・`below` でない。`positive_class` を与えた。
+  - 分類で、`cm_actual_threshold` か `cm_positive` を与えた。`positive_class` が学習時のクラスに無い（クラス名は `str()` で照合する）。
+  - 分類で、`positive_class` なしに `cm_predicted_threshold` を与えた（2026-11-26 実装で決定。与えた閾値が黙って無視されるのを防ぐため）。
+- 分類の実測が陽性かどうかも、`str(実測のクラス) == str(positive_class)` で決める。
 
 ### `run.json`
 
@@ -693,6 +716,11 @@ predictions = mloom.predict(
     "outputs/ridge/model.pkl",     # または pickle.load で読んだ辞書
     "data/new.parquet",            # または polars.DataFrame
     keep_columns=("timestamp",),
+    shap=False,                    # True で SHAP の寄与を足す
+    cm_actual_threshold=None,      # 回帰の混同行列: 3 つをそろえて与える
+    cm_predicted_threshold=None,   # 分類では陽性のクラスの確率の閾値（None なら 0.5）
+    cm_positive=None,              # "above" か "below"
+    positive_class=None,           # 分類の混同行列の陽性のクラス
 )
 # polars.DataFrame。入力と同じ行数・同じ順。フィルタの条件を満たさない行は NaN（「予測」）
 ```
@@ -718,13 +746,13 @@ uv run mloom optimize data/train.parquet --target quality --task regression --mo
 uv run mloom optimize data/train.parquet ... --filters config/filters.json
 ```
 
-予測（2026-11-26 に実装。`--shap` と混同行列の引数は未実装で、名前は案。出力の列は「予測」）:
+予測（2026-11-26 に実装。`--shap` と混同行列の引数は同日に Issue #6 で実装。出力の列は「予測」）:
 
 ```powershell
 uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/ridge/predictions.parquet [--keep-columns COL ...] [--shap] [--cm-actual-threshold 0 --cm-predicted-threshold 1 --cm-positive above | --positive-class bad [--cm-predicted-threshold 0.5]]
 ```
 
-- CLI は Python API の予測を呼んで、結果を Parquet に保存するだけにする。`--keep-columns` は空白で区切って並べる（`--keep-columns timestamp lot`。`--exclude-columns` と同じ）。
+- CLI は Python API の予測を呼んで、結果を Parquet に保存するだけにする。`--shap`・`--cm-actual-threshold`・`--cm-predicted-threshold`・`--cm-positive`・`--positive-class` は、同じ名前の API の引数にそのまま渡す。`--keep-columns` は空白で区切って並べる（`--keep-columns timestamp lot`。`--exclude-columns` と同じ）。
 - 標準出力の最後の行に、出力の Parquet のパスを出す。終了コードは `mloom optimize` と同じ。
 
 | 終了コード | 意味 |
@@ -769,7 +797,7 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | データの読み込みと列の除外 | polars |
 | Pipeline、前処理、CV、特徴量選択、モデル（勾配ブースティングも） | scikit-learn |
 | HPO | optuna |
-| 予測時の SHAP の寄与（未実装） | shap |
+| 予測時の SHAP の寄与 | shap |
 | パッケージ管理 | uv |
 | lint、型チェック、テスト | ruff、ty、pytest |
 
@@ -788,7 +816,7 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | `mloom.rows` | 学習に使う行の選択（目的変数の欠損と無限大）と、列ごとの無限大の行数 |
 | `mloom.columns` | 列の除外と理由の記録 |
 | `mloom.cv` | ユーザーが指定した CV の分割 |
-| `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選ぶ。前処理の方式の決定と fit、採用した列の選択） |
+| `mloom.pipeline` | Pipeline の組み立て（先頭の `ColumnTransformer` で列を選ぶ。前処理の方式の決定と fit、採用した列の選択）と、保存した Pipeline の候補列・採用した列・推定器への入力の取り出し |
 | `mloom.clip` | クリップの上下限の計算と、`run.json` の `preprocessing.clip` |
 | `mloom.selection` | 特徴量選択のランク付け（Pipeline の外で、分割ごとに 1 回） |
 | `mloom.optimize` | `optimize_model`：HPO と最終学習 |
@@ -797,6 +825,9 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 | `mloom.filters` | 行のフィルタの定義の検査と適用 |
 | `mloom.row_hash` | 学習に使った行の照合用の、値による行のハッシュ |
 | `mloom.prediction` | 予測の入口（`predict`）。`mloom.predict` にしない理由は「Python API」 |
+| `mloom.training_period` | 学習期間の終わり（`last_time`）と、その後の行の判定 |
+| `mloom.evaluation` | 学習期間の後の行での、予測のスコアと混同行列 |
+| `mloom.explain` | 採用した列ごとの SHAP の寄与と、線形の SHAP の基準（`shap_background`） |
 | `mloom.cli` / `mloom.__main__` | CLI |
 
 ## 未決事項
@@ -841,10 +872,10 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 - `mloom predict` で予測すると、入力と同じ行数・同じ順で予測が返り、フィルタの条件を満たさない行は NaN になる（2026-11-26 テストで確認）。
 - 学習に使った表をそのまま `mloom predict` に渡すと、最終モデルの学習に使った行だけで `used_for_training` が true になる（説明変数が同じで目的変数だけが欠損した行は false になる）（2026-11-26 テストで確認）。
 - 欠損を含むデータで、補完しない既定のまま `hist_gradient_boosting` と `random_forest` を学習できる（2026-11-26 テストで確認）。
-- `--shap` を付けると、行ごとに `shap_base` と SHAP の寄与の合計が予測値（分類は対数オッズか確率）と一致する。
+- `--shap` を付けると、行ごとに `shap_base` と SHAP の寄与の合計が予測値（分類は対数オッズか確率）と一致する（2026-11-26 テストで確認）。
 - `train_filters` で 9 月までに絞って学習すると、1 年分を `mloom predict` に渡したとき、10 月以降の行も予測され、`used_for_training` が false になる（2026-11-26 テストで、`train_filters` で外した行が予測されて false になることを確認）。
-- 回帰の `mloom predict` で、学習期間の後の行だけに `error` が入り、`rmse`・`r2` がその行だけで計算される。
-- 閾値を与えると、`cm` と `accuracy`・`precision`・`recall` が、学習期間の後の行だけで計算される。
+- 回帰の `mloom predict` で、学習期間の後の行だけに `error` が入り、`rmse`・`r2` がその行だけで計算される（2026-11-26 テストで確認）。
+- 閾値を与えると、`cm` と `accuracy`・`precision`・`recall` が、学習期間の後の行だけで計算される（2026-11-26 テストで確認）。
 - `str_contains_all`・`str_contains_any` と、日時の列との比較で、学習の行を絞れる（2026-11-26 テストで確認）。
 - 説明変数に無限大がある行も、学習から外されず、予測でも値が返る（2026-11-26 テストで確認）。
 - クリップと補完のそれぞれの方式で、学習と予測ができる（2026-11-26 テストで確認）。

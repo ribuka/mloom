@@ -4,14 +4,24 @@ import pickle
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import UTC
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
 import pytest
+from sklearn.base import is_classifier
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import r2_score, root_mean_squared_error
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer
 
 import mloom
 from mloom import Config, InputError, optimize_model, predict
+from mloom.pipeline import estimator_input
 from mloom.result import Result
 
 FILTERS = ({"column": "mode", "op": "str_contains_any", "value": ["steady"]},)
@@ -43,7 +53,7 @@ def _passed(data: pl.DataFrame) -> pl.Series:
 def test_regression_output_has_the_rows_and_columns_of_the_spec(data: pl.DataFrame, trained: Result) -> None:
     """One row per input row, in order; rows outside ``filters`` are NaN and the others are predicted."""
     output = predict(trained.model_bundle(), data, keep_columns=("t", "lot"))
-    assert output.columns == ["t", "lot", "prediction", "passed_filter", "used_for_training"]
+    assert output.columns == ["t", "lot", "prediction", "passed_filter", "used_for_training", "error", "rmse", "r2"]
     assert output.height == data.height
     assert output["t"].to_list() == data["t"].to_list()
     passed = _passed(data)
@@ -185,6 +195,7 @@ import pickle
 import sys
 
 sys.modules["mloom"] = None  # any import of mloom fails
+sys.modules["shap"] = None  # and of shap
 import numpy as np
 import polars as pl
 
@@ -234,3 +245,354 @@ def test_model_pkl_is_read_and_predicts_without_mloom(
     )
     assert completed.returncode == 0, completed.stderr
     np.testing.assert_array_equal(np.load(out, allow_pickle=True), result.pipeline.predict(data))
+
+
+_SHAP_LESS = """
+import sys
+
+import mloom
+
+mloom.predict(sys.argv[1], sys.argv[2], cm_actual_threshold=0, cm_predicted_threshold=0, cm_positive="above")
+assert "shap" not in sys.modules
+"""
+
+
+def test_shap_is_not_imported_without_shap(data: pl.DataFrame, trained: Result, tmp_path: Path) -> None:
+    """Predicting without ``shap`` (with the scores and the confusion matrix) does not import shap."""
+    trained.save(tmp_path)
+    data.write_parquet(tmp_path / "data.parquet")
+    paths = [str(tmp_path / "model.pkl"), str(tmp_path / "data.parquet")]
+    completed = subprocess.run([sys.executable, "-c", _SHAP_LESS, *paths], capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+
+
+# The scores and the confusion matrix (see "スコア" and "混同行列" in docs/spec.md).
+
+FIRST_HALF = ({"column": "t", "op": "lt", "value": 60},)
+
+
+def _three_classes() -> pl.Expr:
+    return (
+        pl.when(pl.col("y") > 1)
+        .then(pl.lit("high"))
+        .when(pl.col("y") > -1)
+        .then(pl.lit("mid"))
+        .otherwise(pl.lit("low"))
+    )
+
+
+@pytest.fixture
+def scored_data(data: pl.DataFrame) -> pl.DataFrame:
+    """Put a NaN, an infinite and a missing target into ``data`` after the first half."""
+    return data.with_columns(
+        y=pl.when(pl.col("t") == 71)
+        .then(float("nan"))
+        .when(pl.col("t") == 72)
+        .then(float("inf"))
+        .when(pl.col("t") == 73)
+        .then(None)
+        .otherwise(pl.col("y"))
+    )
+
+
+@pytest.fixture
+def first_half(scored_data: pl.DataFrame, make_config: Callable[..., Config]) -> Result:
+    """Fit a ridge regression on the first half of the time (``train_filters``), with ``filters``."""
+    config = make_config(cv="timeseries", time_column="t", filters=FILTERS, train_filters=FIRST_HALF)
+    return optimize_model(scored_data, config)
+
+
+def test_regression_scores_are_those_of_the_rows_after_training(scored_data: pl.DataFrame, first_half: Result) -> None:
+    """``error`` is on the rows after ``last_time`` with a target and a prediction; ``rmse`` and ``r2`` are theirs."""
+    bundle = first_half.model_bundle()
+    last_time = bundle["training_rows"]["last_time"]
+    trained_on = scored_data.filter((pl.col("t") < 60) & (pl.col("mode") == "steady") & pl.col("y").is_not_null())
+    assert last_time == trained_on["t"].max() == 59
+    output = predict(bundle, scored_data)
+
+    expected = scored_data.select(
+        (pl.col("t") > last_time) & pl.col("y").is_finite().fill_null(value=False) & (pl.col("mode") == "steady")
+    ).to_series()
+    assert output["error"].is_not_null().to_list() == expected.to_list()
+    # Not scored: up to last_time, a NaN, infinite or missing target, and the rows outside filters.
+    assert not expected.filter(scored_data["t"].is_in([59, 70, 71, 72, 73])).any()
+    assert expected.sum() == 60 - 6 - 3  # t = 60..119 but 6 rows outside filters and 3 targets
+    actual = scored_data.filter(expected)["y"].to_numpy()
+    prediction = output.filter(expected)["prediction"].to_numpy()
+    np.testing.assert_allclose(output.filter(expected)["error"].to_numpy(), prediction - actual, rtol=0, atol=1e-9)
+    assert output["rmse"].unique().to_list() == pytest.approx([root_mean_squared_error(actual, prediction)], abs=1e-9)
+    assert output["r2"].unique().to_list() == pytest.approx([r2_score(actual, prediction)], abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("time_column", "make_data"),
+    [(None, lambda data: data), ("t", lambda data: data.drop("y"))],
+    ids=["no time_column", "no target"],
+)
+def test_scores_are_null_when_they_cannot_be_told(
+    scored_data: pl.DataFrame,
+    make_config: Callable[..., Config],
+    time_column: str | None,
+    make_data: Callable[[pl.DataFrame], pl.DataFrame],
+) -> None:
+    """A model without ``time_column``, or data without the target, gives null scores and confusion matrix."""
+    cv = "kfold" if time_column is None else "timeseries"
+    result = optimize_model(scored_data, make_config(cv=cv, time_column=time_column, train_filters=FIRST_HALF))
+    assert (result.model_bundle()["training_rows"]["last_time"] is None) == (time_column is None)
+    output = predict(
+        result.model_bundle(),
+        make_data(scored_data),
+        cm_actual_threshold=0.0,
+        cm_predicted_threshold=0.0,
+        cm_positive="above",
+    )
+    scores = ["error", "rmse", "r2", "cm", "accuracy", "precision", "recall"]
+    assert output.columns[-7:] == scores
+    assert all(output[name].is_null().all() for name in scores)
+    assert output["cm"].dtype == pl.String
+    assert output["prediction"].is_not_nan().all()
+
+
+def _identity_bundle(x: list[float], y: list[float], last_time: int) -> tuple[dict[str, Any], pl.DataFrame]:
+    """Build a regression model that predicts ``x`` exactly, and the table of ``x``, ``y`` and ``t`` = 1, 2, ..."""
+    pipeline = Pipeline(
+        [
+            ("columns", ColumnTransformer([("keep", "passthrough", ["x"])], remainder="drop")),
+            ("preprocess", FunctionTransformer()),
+            ("select", ColumnTransformer([("keep", "passthrough", [0])], remainder="drop")),
+            ("model", KNeighborsRegressor(n_neighbors=1)),
+        ]
+    )
+    pipeline.fit(pl.DataFrame({"x": x}), x)
+    training_rows = {
+        "columns": ["x", "y", "t"],
+        "target": "y",
+        "time_column": "t",
+        "group_column": None,
+        "hashes": np.array([], dtype=np.uint64),
+        "last_time": last_time,
+    }
+    bundle = {
+        "pipeline": pipeline,
+        "filters": [],
+        "train_filters": [],
+        "training_rows": training_rows,
+        "shap_background": np.zeros(1),
+    }
+    return bundle, pl.DataFrame({"x": x, "y": y, "t": range(1, len(x) + 1)})
+
+
+# Prediction and target of each row: (3, 2), (2, 2), (3, 1), (1, 0), (2, 1); the times are 1 to 5.
+_CM_X = [3.0, 2.0, 3.0, 1.0, 2.0]
+_CM_Y = [2.0, 2.0, 1.0, 0.0, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("positive", "predicted_threshold", "last_time", "cm", "rates"),
+    [
+        # Above 1 (target) and 2 (prediction); a value equal to a threshold is negative.
+        ("above", 2.0, 0, ["tp", "fn", "fp", "tn", "tn"], (3 / 5, 1 / 2, 1 / 2)),
+        # Below 1 and 2: only (1, 0) is positive at all.
+        ("below", 2.0, 0, ["tn", "tn", "tn", "tp", "tn"], (1.0, 1.0, 1.0)),
+        # Below 1 and 0: nothing is predicted positive, so precision has no denominator.
+        ("below", 0.0, 0, ["tn", "tn", "tn", "fn", "tn"], (4 / 5, None, 0.0)),
+        # Above, with the first 2 rows up to last_time: no positive target is left, so recall has none.
+        ("above", 2.0, 2, [None, None, "fp", "tn", "tn"], (2 / 3, 0.0, None)),
+        # No row after last_time: every rate has no denominator.
+        ("above", 2.0, 5, [None] * 5, (None, None, None)),
+    ],
+)
+def test_regression_confusion_matrix_counts_by_hand(
+    positive: str, predicted_threshold: float, last_time: int, cm: list[str | None], rates: tuple[float | None, ...]
+) -> None:
+    """``tp``, ``fp``, ``fn`` and ``tn`` follow the thresholds and the side; the rates come from their counts."""
+    bundle, table = _identity_bundle(_CM_X, _CM_Y, last_time)
+    output = predict(
+        bundle, table, cm_actual_threshold=1.0, cm_predicted_threshold=predicted_threshold, cm_positive=positive
+    )
+    assert output["prediction"].to_list() == _CM_X
+    assert output["cm"].to_list() == cm
+    for name, rate in zip(("accuracy", "precision", "recall"), rates, strict=True):
+        assert output[name].to_list() == pytest.approx([rate] * 5)
+
+
+@pytest.mark.parametrize("n_classes", [2, 3])
+def test_classification_confusion_matrix_follows_the_probability_threshold(
+    scored_data: pl.DataFrame, make_config: Callable[..., Config], n_classes: int
+) -> None:
+    """A row is predicted positive when the probability of the positive class is above the threshold.
+
+    With 3 classes, the positive class is told from all the others.
+    """
+    labels = _three_classes() if n_classes == 3 else pl.col("c")
+    table = scored_data.with_columns(c=pl.when(pl.col("t") == 75).then(None).otherwise(labels))
+    positive = "high" if n_classes == 3 else "pos"
+    config = make_config(task="classification", target="c", cv="timeseries", time_column="t", train_filters=FIRST_HALF)
+    bundle = optimize_model(table, config).model_bundle()
+    assert len(bundle["pipeline"].classes_) == n_classes
+    scored = table.select((pl.col("t") > 59) & pl.col("c").is_not_null()).to_series()
+    actual = (table["c"] == positive).fill_null(value=False)
+
+    cms = {}
+    for threshold in (0.5, 0.9):
+        output = predict(bundle, table, positive_class=positive, cm_predicted_threshold=threshold)
+        assert output.columns[-4:] == ["cm", "accuracy", "precision", "recall"]
+        assert "error" not in output.columns
+        predicted = output[f"proba_{positive}"] > threshold
+        expected = [
+            (("t" if is_positive == predicted_positive else "f") + ("p" if predicted_positive else "n")) if is_scored else None
+            for is_scored, is_positive, predicted_positive in zip(scored, actual, predicted, strict=True)
+        ]
+        assert output["cm"].to_list() == expected
+        counts = {cell: expected.count(cell) for cell in ("tp", "fp", "fn", "tn")}
+        assert output["accuracy"][0] == pytest.approx((counts["tp"] + counts["tn"]) / scored.sum())
+        cms[threshold] = expected
+    assert cms[0.5] != cms[0.9]
+    # The default threshold is 0.5.
+    assert predict(bundle, table, positive_class=positive)["cm"].to_list() == cms[0.5]
+
+
+@pytest.mark.parametrize(
+    ("task", "arguments", "message"),
+    [
+        ("regression", {"cm_actual_threshold": 0.0, "cm_positive": "above"}, r"\['cm_predicted_threshold'\] not given"),
+        ("regression", {"cm_actual_threshold": 0, "cm_predicted_threshold": 0, "cm_positive": "over"}, "one of above"),
+        ("regression", {"positive_class": "pos"}, "positive_class is for classification"),
+        ("classification", {"positive_class": "bad"}, "'bad' is not a class of the model"),
+        ("classification", {"positive_class": "pos", "cm_actual_threshold": 0.0}, "are for regression"),
+        ("classification", {"positive_class": "pos", "cm_positive": "above"}, "are for regression"),
+        ("classification", {"cm_predicted_threshold": 0.5}, "needs positive_class"),
+    ],
+)
+def test_invalid_confusion_arguments_raise(
+    data: pl.DataFrame, make_config: Callable[..., Config], task: str, arguments: dict[str, Any], message: str
+) -> None:
+    """Arguments of the confusion matrix that do not fit the model raise ``InputError``."""
+    target = "y" if task == "regression" else "c"
+    bundle = optimize_model(data, make_config(task=task, target=target)).model_bundle()
+    with pytest.raises(InputError, match=message):
+        predict(bundle, data, **arguments)
+
+
+@pytest.mark.parametrize(
+    ("keep", "arguments"),
+    [
+        ("error", {}),
+        ("recall", {"cm_actual_threshold": 0.0, "cm_predicted_threshold": 0.0, "cm_positive": "above"}),
+        ("shap_base", {"shap": True}),
+        ("selected", {"shap": True}),
+    ],
+)
+def test_keep_columns_may_not_have_the_names_of_the_scores(
+    data: pl.DataFrame, trained: Result, keep: str, arguments: dict[str, Any]
+) -> None:
+    """A column of ``keep_columns`` named as a column of the scores, the matrix or SHAP raises ``InputError``."""
+    name = f"shap_{trained.selected_columns[0]}" if keep == "selected" else keep
+    with pytest.raises(InputError, match="names of output columns"):
+        predict(trained.model_bundle(), data.with_columns(pl.lit(0).alias(name)), keep_columns=(name,), **arguments)
+
+
+@pytest.mark.parametrize("kind", ["datetime ns", "datetime ns Asia/Tokyo", "string"])
+def test_last_time_compares_the_rows_as_the_training_sorts_them(
+    data: pl.DataFrame, make_config: Callable[..., Config], kind: str
+) -> None:
+    """The last row trained on is not scored, even with nanoseconds below the microseconds of ``last_time``."""
+    if kind == "string":
+        time = pl.format("T{}", pl.col("t").cast(pl.String).str.zfill(3))
+    else:
+        start = pl.lit("2026-01-01").str.to_datetime(time_unit="ns")
+        time = start + pl.duration(microseconds=pl.col("t"), nanoseconds=500)
+        if kind.endswith("Tokyo"):
+            time = time.dt.replace_time_zone("Asia/Tokyo")
+    table = data.with_columns(time=time)
+    config = make_config(
+        cv="timeseries", time_column="time", train_filters=FIRST_HALF, exclude_columns=("y", "c", "t")
+    )
+    bundle = optimize_model(table, config).model_bundle()
+    last_time = bundle["training_rows"]["last_time"]
+    if kind == "string":
+        assert last_time == "T059"
+    else:
+        assert last_time.microsecond == 59
+        assert last_time.tzinfo == (UTC if kind.endswith("Tokyo") else None)
+    output = predict(bundle, table)
+    assert output["error"].is_not_null().to_list() == ((table["t"] > 59) & table["y"].is_not_null()).to_list()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda data: data.with_columns(pl.col("time").dt.replace_time_zone("UTC")),
+        lambda data: data.with_columns(pl.col("time").cast(pl.String)),
+    ],
+    ids=["time zone added", "string"],
+)
+def test_time_column_of_another_kind_raises(
+    data: pl.DataFrame, make_config: Callable[..., Config], change: Callable[[pl.DataFrame], pl.DataFrame]
+) -> None:
+    """With the target, a ``time_column`` that cannot be compared with ``last_time`` raises ``InputError``."""
+    table = data.with_columns(time=pl.lit("2026-01-01").str.to_datetime() + pl.duration(seconds=pl.col("t")))
+    config = make_config(cv="timeseries", time_column="time", exclude_columns=("y", "c", "t"))
+    bundle = optimize_model(table, config).model_bundle()
+    with pytest.raises(InputError, match="cannot be compared"):
+        predict(bundle, change(table))
+
+
+# The SHAP contributions (see "SHAP の寄与" in docs/spec.md).
+
+
+def _model_output(estimator: Any, x: np.ndarray) -> np.ndarray:  # noqa: ANN401 - any estimator
+    """Compute the output the contributions add up to: prediction, log odds, or probability (random forest)."""
+    if not is_classifier(estimator):
+        return np.asarray(estimator.predict(x)).reshape(len(x), 1)
+    if isinstance(estimator, RandomForestClassifier):
+        output = estimator.predict_proba(x)
+        return output[:, 1:] if output.shape[1] == 2 else output
+    return np.asarray(estimator.decision_function(x)).reshape(len(x), -1)
+
+
+@pytest.mark.parametrize(
+    ("model", "task", "n_classes"),
+    [
+        ("ridge", "regression", 0),
+        ("pls", "regression", 0),
+        ("random_forest", "regression", 0),
+        ("hist_gradient_boosting", "regression", 0),
+        ("ridge", "classification", 2),
+        ("random_forest", "classification", 2),
+        ("hist_gradient_boosting", "classification", 2),
+        ("ridge", "classification", 3),
+        ("random_forest", "classification", 3),
+        ("hist_gradient_boosting", "classification", 3),
+    ],
+)
+def test_shap_contributions_add_up_to_the_output(
+    data: pl.DataFrame, make_config: Callable[..., Config], model: str, task: str, n_classes: int
+) -> None:
+    """``shap_base`` plus the contributions is the output of the model, for each selected column and class."""
+    table = data.with_columns(c=_three_classes()) if n_classes == 3 else data
+    target = "y" if task == "regression" else "c"
+    result = optimize_model(table, make_config(model=model, task=task, target=target, filters=FILTERS))
+    output = predict(result.model_bundle(), table, shap=True)
+
+    selected = result.selected_columns
+    classes = [None] if n_classes < 3 else [str(label) for label in result.pipeline.classes_]
+    names = [
+        name
+        for label in classes
+        for name in (
+            "shap_base" if label is None else f"shap_base_{label}",
+            *(f"shap_{column}" if label is None else f"shap_{label}_{column}" for column in selected),
+        )
+    ]
+    assert [name for name in output.columns if name.startswith("shap_")] == names
+    assert len(names) == len(classes) * (len(selected) + 1)
+
+    passed = _passed(table)
+    assert all(output.filter(~passed)[name].is_nan().all() for name in names)
+    rows = output.filter(passed)
+    expected = _model_output(result.pipeline[-1], estimator_input(result.pipeline, table.filter(passed)))
+    width = len(selected) + 1
+    for index in range(len(classes)):
+        total = rows.select(names[index * width : (index + 1) * width]).to_numpy().sum(axis=1)
+        np.testing.assert_allclose(total, expected[:, index], rtol=0, atol=1e-6)

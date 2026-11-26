@@ -19,6 +19,7 @@ from mloom.config import Config
 from mloom.cv import CVPlan, order_rows, plan_cv
 from mloom.data import Data, load_data
 from mloom.errors import InputError, OptimizationError
+from mloom.explain import shap_background
 from mloom.filters import apply_filters
 from mloom.metrics import BINARY_ONLY_METRICS
 from mloom.pipeline import (
@@ -36,6 +37,7 @@ from mloom.rows import select_rows
 from mloom.selection import rank_columns, top_columns
 from mloom.sensors import load_unavailable_sensors
 from mloom.settings import load_settings
+from mloom.training_period import last_time
 
 K_PARAM = "k"
 
@@ -120,6 +122,8 @@ def optimize_model(data: Data, config: Config) -> Result:
         hpo=_describe_search(study, config),
         created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
         training_hashes=np.unique(hash_rows(rows, hash_columns(columns.candidates, config))),
+        last_time=last_time(rows, config.time_column),
+        shap_background=shap_background(pipeline, rows),
     )
 
 
