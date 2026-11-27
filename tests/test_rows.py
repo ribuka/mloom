@@ -8,9 +8,9 @@ import pytest
 from mloom.config import Config
 from mloom.errors import InputError
 from mloom.rows import select_rows
-from mloom.sensors import UnavailableSensors
+from mloom.sensors import EXACT, SensorEntry, UnavailableSensors
 
-NO_SENSORS = UnavailableSensors(path=None, found=False, reasons={})
+NO_SENSORS = UnavailableSensors(path=None, found=False, entries=[])
 INF = float("inf")
 
 
@@ -53,7 +53,7 @@ def test_unlabeled_rows_can_be_left_out(data: pl.DataFrame, make_config: Callabl
 def test_columns_excluded_by_name_are_not_counted(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
     """Infinite values in a user-excluded column or an unavailable sensor are not counted."""
     data = frame.with_columns(_set("s0", [0], INF), _set("s1", [1], INF), _set("s2", [2], INF))
-    sensors = UnavailableSensors(path="x.json", found=True, reasons={"s1": None})
+    sensors = UnavailableSensors(path="x.json", found=True, entries=[SensorEntry("s1", EXACT, None)])
     rows = select_rows(data, make_config(exclude_columns=("s0", "c")), sensors, use_unlabeled=True)
     assert rows.infinite_by_column == {"s2": 1}
     assert rows.n_with_infinite_target == 0

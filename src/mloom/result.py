@@ -184,12 +184,7 @@ class Result:
             "exclude_columns": list(config.exclude_columns),
             "filters": [dict(condition) for condition in config.filters],
             "train_filters": [dict(condition) for condition in config.train_filters],
-            "unavailable_sensors": {
-                "path": self.sensors.path,
-                "found": self.sensors.found,
-                "sensors": self.sensors.reasons,
-                "not_in_data": self.columns.sensors_not_in_data,
-            },
+            "unavailable_sensors": self._describe_sensors(),
             "settings": self.settings.to_dict(),
             "preprocessing": {"clip": self.clip, "impute": self.impute, "categorical": self.categorical},
             "excluded_columns": [vars(column) for column in self.columns.excluded],
@@ -202,6 +197,20 @@ class Result:
             "cv_scores": self.cv_scores,
             "interpretation": self.interpretation,
             "versions": _versions(),
+        }
+
+    def _describe_sensors(self) -> dict[str, Any]:
+        # Each entry with the columns it matched; an entry that matched none may be a typo.
+        entries = self.sensors.entries
+        matched = self.columns.sensor_columns
+        return {
+            "path": self.sensors.path,
+            "found": self.sensors.found,
+            "sensors": [
+                {"name": entry.name, "match": entry.match, "reason": entry.reason, "columns": columns}
+                for entry, columns in zip(entries, matched, strict=True)
+            ],
+            "not_in_data": [entry.name for entry, columns in zip(entries, matched, strict=True) if not columns],
         }
 
     def model_bundle(self) -> dict[str, Any]:

@@ -14,13 +14,18 @@ from mloom.columns import (
 )
 from mloom.config import Config
 from mloom.errors import InputError
-from mloom.sensors import UnavailableSensors
+from mloom.sensors import EXACT, SensorEntry, UnavailableSensors
 
-NO_SENSORS = UnavailableSensors(path=None, found=False, reasons={})
+NO_SENSORS = UnavailableSensors(path=None, found=False, entries=[])
 
 
 def _sensors(**reasons: str | None) -> UnavailableSensors:
-    return UnavailableSensors(path="x.json", found=True, reasons=reasons)
+    # Entries matched exactly, named by the keywords.
+    return _entries(*(SensorEntry(name, EXACT, reason) for name, reason in reasons.items()))
+
+
+def _entries(*entries: SensorEntry) -> UnavailableSensors:
+    return UnavailableSensors(path="x.json", found=True, entries=list(entries))
 
 
 def test_each_column_gets_its_reason(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
@@ -44,7 +49,7 @@ def test_each_column_gets_its_reason(frame: pl.DataFrame, make_config: Callable[
         "sparse": "high_missing",
     }
     assert plan.candidates == ["t", "s0", "s1", "s2", "s3"]
-    assert plan.sensors_not_in_data == ["gone"]
+    assert plan.sensor_columns == [["s4"], []]
 
 
 @pytest.mark.parametrize(("model", "categorical"), [("lightgbm", True), ("ridge", False), ("pls", False), ("random_forest", False)])
@@ -106,6 +111,26 @@ def test_unavailable_sensor_keeps_its_reason(frame: pl.DataFrame, make_config: C
     assert excluded.detail == "故障"
 
 
+def test_every_column_an_entry_matches_is_excluded(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+    """Each way of matching excludes all the columns it matches, with the reason of the first entry that matches."""
+    data = frame.rename({"s0": "TI-101_mean", "s1": "TI-101_max", "s2": "TI-1010", "s3": "FI-2_raw", "s4": "xTESTx"})
+    sensors = _entries(
+        SensorEntry("TI-101_", "starts_with", "故障"),
+        SensorEntry("_max", "ends_with", "後に書いた行"),
+        SensorEntry("_raw", "ends_with", None),
+        SensorEntry("TEST", "contains", "試験"),
+        SensorEntry("t", EXACT, None),
+        SensorEntry("TI-101", EXACT, None),
+    )
+    plan = plan_columns(data, data.clear(), make_config(cv="timeseries", time_column="t"), sensors, 0.5)
+    details = {column.name: column.detail for column in plan.excluded if column.reason == "unavailable_sensor"}
+    assert details == {"TI-101_mean": "故障", "TI-101_max": "故障", "FI-2_raw": None, "xTESTx": "試験"}
+    assert plan.candidates == ["TI-1010", "s5"]
+    # The role column t is matched too, but excluded as a role.
+    assert [column.reason for column in plan.excluded if column.name == "t"] == ["role"]
+    assert plan.sensor_columns == [["TI-101_mean", "TI-101_max"], ["TI-101_max"], ["FI-2_raw"], ["xTESTx"], ["t"], []]
+
+
 @pytest.mark.parametrize(
     ("labeled_missing", "unlabeled_missing", "detail"),
     [
@@ -165,7 +190,8 @@ def test_no_candidate_raises(frame: pl.DataFrame, make_config: Callable[..., Con
     [
         ({"target": "missing"}, NO_SENSORS, "'missing' is not in the data"),
         ({"cv": "timeseries", "time_column": "time"}, NO_SENSORS, "'time' is not in the data"),
-        ({}, _sensors(y="故障"), "listed as an unavailable sensor"),
+        ({}, _sensors(y="故障"), "'y' is an unavailable sensor: it matches 'y' \\(match 'exact'\\)"),
+        ({}, _entries(SensorEntry("y", "starts_with", None)), "matches 'y' \\(match 'starts_with'\\)"),
     ],
 )
 def test_check_columns_raises(
