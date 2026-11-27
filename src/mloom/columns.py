@@ -54,14 +54,16 @@ class ColumnPlan:
         data; empty unless the model ``handles_categorical``.
     excluded : list[ExcludedColumn]
         Excluded columns, in the order of the data.
-    sensors_not_in_data : list[str]
-        Unavailable sensors that are not columns of the data.
+    sensor_columns : list[list[str]]
+        For each entry of ``unavailable-sensors.json`` (in the order of the
+        file), the columns of the data it matches, in the order of the data;
+        also those excluded for another reason, such as ``role``.
     """
 
     numeric: list[str]
     categorical: list[str]
     excluded: list[ExcludedColumn]
-    sensors_not_in_data: list[str]
+    sensor_columns: list[list[str]]
 
     @property
     def candidates(self) -> list[str]:
@@ -96,8 +98,11 @@ def check_columns(frame: pl.DataFrame, config: Config, sensors: UnavailableSenso
     for name in (config.target, *config.role_columns):
         if name not in frame.columns:
             raise InputError(f"column {name!r} is not in the data")
-    if config.target in sensors.reasons:
-        raise InputError(f"target {config.target!r} is listed as an unavailable sensor")
+    entry = sensors.first_match(config.target)
+    if entry is not None:
+        raise InputError(
+            f"target {config.target!r} is an unavailable sensor: it matches {entry.name!r} (match {entry.match!r})"
+        )
 
 
 def check_role_values(frame: pl.DataFrame, config: Config) -> None:
@@ -162,12 +167,12 @@ def plan_columns(
             excluded.append(reason)
         elif kind is not None:  # always: a column without a kind is non_numeric
             candidates[kind].append(name)
-    not_in_data = [name for name in sensors.reasons if name not in frame.columns]
+    sensor_columns = [[name for name in frame.columns if entry.matches(name)] for entry in sensors.entries]
     return ColumnPlan(
         numeric=candidates[NUMERIC],
         categorical=candidates[CATEGORICAL],
         excluded=excluded,
-        sensors_not_in_data=not_in_data,
+        sensor_columns=sensor_columns,
     )
 
 
@@ -211,8 +216,9 @@ def name_reason(name: str, config: Config, sensors: UnavailableSensors) -> Exclu
         return ExcludedColumn(name, "role")
     if name in config.exclude_columns:
         return ExcludedColumn(name, "user_excluded")
-    if name in sensors.reasons:
-        return ExcludedColumn(name, "unavailable_sensor", sensors.reasons[name])
+    entry = sensors.first_match(name)
+    if entry is not None:
+        return ExcludedColumn(name, "unavailable_sensor", entry.reason)
     return None
 
 

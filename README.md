@@ -62,6 +62,9 @@ uv run mloom show outputs/quality-lgbm/model.pkl
 ```
 
 - `--unavailable-sensors` を省くと、カレントディレクトリの `config/unavailable-sensors.json` を読みます（無ければ除外なし）。
+  - 書き方は `examples/unavailable-sensors.json` を見てください。各行の `name` は既定で列名と完全に一致したときだけ当たります。`"match"` に `starts_with`（始まる）・`ends_with`（終わる）・`contains`（含む）を書くと、1 行で複数の列を外せます。例: `{"name": "TI-101_", "match": "starts_with", "reason": "故障中"}` で `TI-101_mean`・`TI-101_max` などが外れます。
+  - 文字の並びそのままで比べます（大文字と小文字を区別し、正規表現やワイルドカードとしては解釈しません）。`starts_with` で `TI-101` と書くと `TI-1010` にも当たるので、区切り文字まで（`TI-101_`）書いてください。
+  - `reason` は省けます。どの行に当たってどの列が外れたかは、記録の `unavailable_sensors.sensors` の `columns` に残ります。どの列にも当たらなかった行は `not_in_data` に残ります（書き間違いの手がかり）。
 - 同じく `--settings` を省くと `config/mloom.toml` を読みます。欠損率のしきい値（`[columns] max_missing_rate`）、目的変数が欠損した行を統計量に使うか（`[preprocessing] use_unlabeled_rows`）、クリップ（`[clip]`）と補完（`[impute]`）の方式、似た列をまとめる相関のしきい値（`[selection] max_correlation`）、permutation importance の繰り返し回数（`[importance] n_repeats`）を変えられます（下の「前処理」「特徴量選択」「解釈」）。
 - `unavailable-sensors.json` と `mloom.toml` は、mloom を使う側のリポジトリの `config/` に置きます。
 

@@ -119,7 +119,35 @@ def test_unavailable_sensor_is_never_selected(
     assert "s0" not in run["candidate_columns"]
     assert "s0" not in run["selected_columns"]
     assert {"name": "s0", "reason": "unavailable_sensor", "detail": "故障"} in run["excluded_columns"]
+    assert run["unavailable_sensors"]["sensors"] == [
+        {"name": "s0", "match": "exact", "reason": "故障", "columns": ["s0"]},
+        {"name": "gone", "match": "exact", "reason": None, "columns": []},
+    ]
     assert run["unavailable_sensors"]["not_in_data"] == ["gone"]
+
+
+def test_sensor_matched_by_its_start_excludes_all_its_columns(
+    frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path
+) -> None:
+    """An entry matched by the start of the names excludes every such column, and the record lists them."""
+    data = frame.rename({"s2": "TI-101_mean", "s3": "TI-101_max"})
+    sensors = tmp_path / "unavailable-sensors.json"
+    sensors.write_text('{"sensors": [{"name": "TI-101_", "match": "starts_with", "reason": "故障"}]}', encoding="utf-8")
+    run = optimize_model(data, make_config(unavailable_sensors=sensors)).to_dict()
+    assert not {"TI-101_mean", "TI-101_max"} & set(run["candidate_columns"])
+    assert {"name": "TI-101_max", "reason": "unavailable_sensor", "detail": "故障"} in run["excluded_columns"]
+    assert run["unavailable_sensors"]["sensors"] == [
+        {"name": "TI-101_", "match": "starts_with", "reason": "故障", "columns": ["TI-101_mean", "TI-101_max"]}
+    ]
+    assert run["unavailable_sensors"]["not_in_data"] == []
+
+
+def test_target_matched_by_a_sensor_raises(frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path) -> None:
+    """A target that an entry matches stops the run with ``InputError``."""
+    sensors = tmp_path / "unavailable-sensors.json"
+    sensors.write_text('{"sensors": [{"name": "y", "match": "ends_with"}]}', encoding="utf-8")
+    with pytest.raises(InputError, match="'y' is an unavailable sensor"):
+        optimize_model(frame, make_config(unavailable_sensors=sensors))
 
 
 def test_parquet_path_and_dataframe_agree(

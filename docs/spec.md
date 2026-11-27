@@ -107,26 +107,47 @@ Parquet のデータと、ユーザーが選んだモデルを渡すと、**列�
 
 決定事項: 利用側リポジトリの `config/unavailable-sensors.json` にあるセンサは使わない。特徴量選択の前に除外する。
 
-形式（案）:
+形式（照合の方法 `match` は 2026-11-27 ユーザー判断。Issue #30 で実装、`mloom.sensors`）:
 
 ```json
 {
   "sensors": [
     {"name": "TI-101", "reason": "2026-10 から故障中"},
-    {"name": "FI-205"}
+    {"name": "FI-205"},
+    {"name": "TI-102_", "match": "starts_with", "reason": "2026-11 から故障中"},
+    {"name": "_raw", "match": "ends_with"},
+    {"name": "TEST", "match": "contains"}
   ]
 }
 ```
 
-| 状況 | 扱い（案） |
-| --- | --- |
-| ファイルが無い | 除外なしで続ける。記録に「ファイルなし」と残す |
-| JSON として読めない、形式が違う | エラーで止める（終了コード 2） |
-| 列名と一致する | その列を説明変数から外し、記録に理由 `unavailable_sensor` で残す |
-| 定義にあるがデータに無い | 続ける。記録に警告として残す |
-| 目的変数が定義にある | エラーで止める（終了コード 2） |
+| キー | 必須 | 値 |
+| --- | --- | --- |
+| `name` | はい | 空でない文字列 |
+| `match` | いいえ（既定 `exact`） | `exact`・`starts_with`・`ends_with`・`contains` |
+| `reason` | いいえ | 文字列。省けば記録の `detail` が `null` |
 
-- 照合は列名の完全一致（案）。1 つのセンサから複数の列がある場合（`TI-101_mean` など）の照合は「未決事項」。
+| `match` | 列が当たる条件 |
+| --- | --- |
+| `exact` | 列名が `name` と同じ |
+| `starts_with` | 列名が `name` で始まる |
+| `ends_with` | 列名が `name` で終わる |
+| `contains` | 列名が `name` を含む |
+
+- 1 つのセンサから複数の列がある場合（`TI-102_mean`・`TI-102_max` など）は、`starts_with` などで 1 行にまとめて書ける。
+- 文字の並びそのままで比べ、大文字と小文字を区別する。正規表現やワイルドカードとしては解釈しない。`[` や `.` を含むタグ名で思わぬ一致が起きないようにし、正規表現より分かりやすくするため（行のフィルタの `str_contains_*` と同じ理由）。
+- `starts_with` で `TI-102` と書くと `TI-1020` にも当たる。区切り文字まで（`TI-102_`）書く（README と Skill で伝える）。
+- 照合するのは、行のフィルタの後の表のすべての列。どれか 1 つの行に当たった列を除外する。除外の理由の順（「列の除外」）は変わらない。`detail` は、その列に当たった最初の行（ファイルの順）の `reason`。
+- 同じ `name` と `match` の行が 2 つあってもエラーにしない。
+
+| 状況 | 扱い |
+| --- | --- |
+| ファイルが無い | 除外なしで続ける。記録の `found` が `false` |
+| JSON として読めない、形式が違う | エラーで止める（終了コード 2） |
+| `name` が空（`contains` の空文字はすべての列に当たるため、どの `match` でも）、`match` が上の 4 つ以外、1 つの行に `name`・`match`・`reason` 以外のキーがある（`match` の書き間違いで黙って完全一致になるのを防ぐ） | エラーで止める（終了コード 2）。メッセージにファイルと行の `name` を入れる |
+| 列が行に当たる | その列を説明変数から外し、記録に理由 `unavailable_sensor` で残す |
+| どの列にも当たらない行 | 続ける。記録の `not_in_data` に残す（書き間違いの手がかり） |
+| 目的変数がどれかの行に当たる | エラーで止める（終了コード 2）。メッセージに当たった行の `name` と `match` を入れる |
 
 ### 設定ファイル（`config/mloom.toml`）
 
@@ -896,6 +917,8 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
 
 - 一番上の `selection`（`selected_columns` の直前）と、`settings.selection` を足した（2026-11-26、Issue #13。「特徴量選択」）。`selection.n_clusters` はクラスタの数（1 列だけのクラスタも数える）。`selection.clusters` は 2 列以上のクラスタだけを候補列の順に並べ、`representative` は最終モデルでそのクラスタの代表になった列、`selected` はそれが `selected_columns` に入っているか。
 
+- `unavailable_sensors.sensors` を、名前から理由への辞書から、ファイルの行ごとの `name`・`match`（省略時も `"exact"`）・`reason`・`columns`（その行に当たったデータの列。データの列の順。`role` などほかの理由で外れた列も入る）のリスト（ファイルの順）にした。`not_in_data` は `columns` が空の行の `name`（2026-11-27、Issue #30。「使えないセンサの定義」）。
+
 - 一番上の `base`（`mloom_version` の直後）と `exclude_columns`（`seed` の直後。`Config.exclude_columns` のとおり）を足した（2026-11-26、Issue #16。「ベースのモデル」）。
   - ベースの無い `optimize` の記録では `base` は `null`。refit の記録では `hpo` と `selection` が `null` で、`base` は次の形。
 
@@ -962,7 +985,10 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
   "unavailable_sensors": {
     "path": "config/unavailable-sensors.json",
     "found": true,
-    "sensors": {"TI-101": "2026-10 から故障中", "FI-205": "廃止"},
+    "sensors": [
+      {"name": "TI-101", "match": "exact", "reason": "2026-10 から故障中", "columns": ["TI-101"]},
+      {"name": "FI-205", "match": "exact", "reason": "廃止", "columns": []}
+    ],
     "not_in_data": ["FI-205"]
   },
   "settings": {
@@ -1275,7 +1301,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.metrics` | 評価指標と、タスクごとに選べる指標 |
 | `mloom.models` | モデルのレジストリ（推定器、標準化の要否、欠損を扱えるかと `auto` の補完、カテゴリの列を扱えるか、探索空間と、パラメータがそれに合うかの検査（`check_params`）、特徴量選択のパラメータ名 `K_PARAM`・`use:<列名>` と、それを除いたモデルの引数（`model_params`）） |
 | `mloom.data` | データの読み込み |
-| `mloom.sensors` | `unavailable-sensors.json` の読み込み |
+| `mloom.sensors` | `unavailable-sensors.json` の読み込みと、各行が列に当たるかの判定 |
 | `mloom.settings` | 設定ファイル（`mloom.toml`）とその既定値の読み込みと、ベースの記録の設定の値の読み込み（`settings_from_record`） |
 | `mloom.rows` | 学習に使う行の選択（目的変数の欠損と無限大）と、列ごとの無限大の行数 |
 | `mloom.columns` | 列の除外と理由の記録。残った列を数値とカテゴリの候補列に分ける |
@@ -1310,7 +1336,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | 3 | CV で選べる方法 | `timeseries`、`group`、`kfold` の 3 つ。時系列かつグループ（ロットごとに時刻順）の分割が要るか |
 | 4 | `timeseries` の時刻の列 | `time_column` を必須にする。行の並び順を時刻順とみなす指定も許すか |
 | 5 | 特徴量選択の方法 | **決定**（2026-11-26）: `f_regression`・`f_classif` のランクの上位 `k` 列（`k` を HPO で探索）に、相関クラスタリングで似た列をまとめ、各クラスタの代表だけを候補にする間引きを足す。→「特徴量選択」 |
-| 6 | `unavailable-sensors.json` の形式と照合 | `{"sensors": [{"name", "reason"}]}`、列名の完全一致。接頭辞やパターンでの照合が要るか |
+| 6 | `unavailable-sensors.json` の形式と照合 | **決定**（2026-11-27）: `{"sensors": [{"name", "match", "reason"}]}`。`match` は `exact`（既定）・`starts_with`・`ends_with`・`contains`。正規表現やワイルドカードは使わない。→「使えないセンサの定義」 |
 | 7 | 数値でない列の扱い | **決定**（2026-11-26 ユーザー判断。2026-11-27 に Issue #21 で実装）: `lightgbm` では String・Categorical・Enum の列を `OrdinalEncoder` で整数にし、LightGBM のカテゴリの列として使う。ほかのモデルでは除外する（`non_numeric`）。→「カテゴリの列（`lightgbm`）」 |
 | 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`lightgbm`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |
 | 9 | 選べるモデル | 表の 4 つで始める。API から任意の推定器と探索空間を渡せるようにするか |
