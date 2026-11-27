@@ -261,12 +261,16 @@ def _search(
     def objective(trial: optuna.Trial) -> float:
         params, selection = _suggest(trial, config, n_clusters, categorical)
         fold_scores = []
-        for (train, test), (preprocess, ranking) in zip(cv_plan.folds, prepared, strict=True):
+        fold_errors = []
+        for fold, ((train, test), (preprocess, ranking)) in enumerate(zip(cv_plan.folds, prepared, strict=True)):
             keep = keep_columns(selection, ranking, categorical, n_numeric)
             pipeline = build_pipeline(config, params, preprocess, keep)
-            score = _score_fold(pipeline, scorer, (x[train], y[train]), (x[test], y[test]))
+            score, error = _score_fold(pipeline, scorer, (x[train], y[train]), (x[test], y[test]))
             fold_scores.append(metric.report_value(score))
+            if error is not None:
+                fold_errors.append({"fold": fold, "error": error})
         trial.set_user_attr("fold_scores", fold_scores)
+        trial.set_user_attr("fold_errors", fold_errors)
         # A NaN (a fold failed) makes Optuna record the trial as failed.
         return float(np.mean(fold_scores))
 
@@ -296,13 +300,14 @@ def _score_fold(
     scorer: Any,  # noqa: ANN401 - a scikit-learn scorer
     train: tuple[np.ndarray, np.ndarray],
     test: tuple[np.ndarray, np.ndarray],
-) -> float:
+) -> tuple[float, str | None]:
+    # The score, or NaN with the repr of the error when the fold failed.
     try:
         pipeline.fit(*train)
-        return float(scorer(pipeline, *test))
+        return float(scorer(pipeline, *test)), None
     except Exception as error:  # noqa: BLE001 - a failed fold fails the trial, not the run
         warnings.warn(f"a CV fold failed: {error!r}", stacklevel=2)
-        return float("nan")
+        return float("nan"), repr(error)
 
 
 def _completed(study: optuna.Study) -> list[optuna.trial.FrozenTrial]:
@@ -317,4 +322,19 @@ def _describe_search(study: optuna.Study, config: Config) -> dict[str, Any]:
         "n_trials_failed": sum(trial.state == optuna.trial.TrialState.FAIL for trial in study.trials),
         "timeout": config.timeout,
         "best_trial": study.best_trial.number,
+        "trials": [_describe_trial(trial) for trial in study.trials],
+    }
+
+
+def _describe_trial(trial: optuna.trial.FrozenTrial) -> dict[str, Any]:
+    # A failed fold is null: a NaN in the record would make the JSON of mloom show invalid.
+    completed = trial.state == optuna.trial.TrialState.COMPLETE
+    return {
+        "number": trial.number,
+        "state": trial.state.name.lower(),
+        "value": trial.value if completed else None,
+        "folds": [None if math.isnan(score) else score for score in trial.user_attrs["fold_scores"]],
+        "params": trial.params,
+        "seconds": None if trial.duration is None else trial.duration.total_seconds(),
+        "errors": trial.user_attrs["fold_errors"],
     }

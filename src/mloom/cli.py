@@ -4,7 +4,8 @@ It holds no processing of its own (see "CLI" in ``docs/spec.md``). Exit
 codes: 0 on success, 2 for invalid input (including invalid arguments), 1
 for any other error. The last line of stdout of ``optimize``, ``refit`` and
 ``predict`` is the path of the saved file (``model.pkl``, the predictions);
-``show`` prints the record of the run as JSON. Progress, warnings (as
+``show`` prints the record of the run as JSON without ``hpo.trials``, or
+with ``--trials`` those trials as CSV. Progress, warnings (as
 ``warning:`` lines) and errors go to stderr.
 """
 
@@ -38,6 +39,7 @@ from mloom.optimize import optimize_model
 from mloom.prediction import PASSED_FILTER, predict
 from mloom.refit import refit_model
 from mloom.result import Result
+from mloom.trials import trials_csv, without_trials
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -117,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--positive-class", help="positive class of the confusion matrix (classification)")
     show = commands.add_parser("show", help="print the record of the run in a model.pkl as JSON")
     show.add_argument("model", type=Path, help="model.pkl saved by optimize or refit")
+    show.add_argument("--trials", action="store_true", help="print the trials of the search as CSV instead of the JSON")
     return parser
 
 
@@ -273,7 +276,11 @@ def _predict(args: argparse.Namespace) -> Path:
 
 
 def _show(args: argparse.Namespace) -> str:
-    return json.dumps(read_run(args.model), ensure_ascii=False, indent=2)
+    run = read_run(args.model)
+    if args.trials:
+        # main prints the line end of the last row.
+        return trials_csv(run).removesuffix("\n")
+    return json.dumps(without_trials(run), ensure_ascii=False, indent=2)
 
 
 def _print_summary(result: Result) -> None:

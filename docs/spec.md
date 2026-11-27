@@ -572,6 +572,21 @@ n_repeats = 5
 - Optuna の `TPESampler(seed=seed)`、試行数 `n_trials`、打ち切り時間 `timeout`。
 - 目的関数は CV の平均スコア（指標の本来の値。RMSE なら正の値）。`rmse`、`mae`、`log_loss` は最小化、`r2`、`accuracy`、`f1_macro`、`roc_auc` は最大化。
 - CV のどれかの分割で学習や評価に失敗した試行は、警告を標準エラーに出し、失敗として記録して比べない（記録の `hpo.n_trials_failed`）。すべての試行が失敗したら `OptimizationError`（終了コード 1）。
+- 全試行を、試行の番号の順に記録の `hpo.trials` に残す（2026-11-27 ユーザー判断。Issue #31。未決 11）。探索が頭打ちになったか、パラメータのどのあたりが良かったか、失敗した試行の原因を、記録だけで説明できるようにするため。`refit` の記録は `hpo` が `null` のまま。
+
+  | キー | 値 |
+  | --- | --- |
+  | `number` | 試行の番号（`best_trial` と同じ番号） |
+  | `state` | `complete` か `fail` |
+  | `value` | 分割のスコアの平均（指標の本来の値）。`fail` なら `null` |
+  | `folds` | 分割ごとのスコア（`cv_scores.folds` と同じ形）。失敗した分割は `null`。記録に NaN を入れると、`mloom show` の JSON が標準の JSON として読めなくなるため |
+  | `params` | その試行のパラメータ（`best_params` と同じ形。`k`・`use:<列名>` を含む） |
+  | `seconds` | 試行にかかった秒数（Optuna の `duration`） |
+  | `errors` | 失敗した分割ごとの `{"fold": 分割の番号（0 から）, "error": 例外の repr}`（警告の文と同じ `repr`）。成功した試行では空のリスト |
+
+  - 試行ごとの採用した列は残さない。分割ごとに列を選び直すので、試行ごとに 1 つに決まらないため。
+  - `optimize --base` でベースのパラメータを最初の試行に入れたときは、それが `number` 0 の試行（`base.enqueued` で分かる）。
+  - `seconds` は実行ごとに変わる。同じ `seed` での再現性（「非機能要件」）の対象に `seconds` は含めない。
 - 進捗は Optuna のログとして標準エラーに出る。
 - 探索空間はモデルごとに mloom 側で固定する（下の「モデル」）。Skill やユーザーには探索空間を書かせない。
 - 特徴量選択のパラメータとして、`k`（数値の候補列があるとき）と、カテゴリの候補列ごとの `use:<列名>`（`lightgbm` で、数値の候補列があるとき）も探索する（「特徴量選択」「カテゴリの列（`lightgbm`）」）。
@@ -919,6 +934,8 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
 
 - `unavailable_sensors.sensors` を、名前から理由への辞書から、ファイルの行ごとの `name`・`match`（省略時も `"exact"`）・`reason`・`columns`（その行に当たったデータの列。データの列の順。`role` などほかの理由で外れた列も入る）のリスト（ファイルの順）にした。`not_in_data` は `columns` が空の行の `name`（2026-11-27、Issue #30。「使えないセンサの定義」）。
 
+- `hpo.trials`（全試行）を足した（2026-11-27、Issue #31。「HPO」）。`mloom show` の既定の出力には出ない（「記録の表示」）。
+
 - 一番上の `base`（`mloom_version` の直後）と `exclude_columns`（`seed` の直後。`Config.exclude_columns` のとおり）を足した（2026-11-26、Issue #16。「ベースのモデル」）。
   - ベースの無い `optimize` の記録では `base` は `null`。refit の記録では `hpo` と `selection` が `null` で、`base` は次の形。
 
@@ -1037,7 +1054,15 @@ refit（`mloom.refit_model`、`mloom.refit`）。`optimize_model` の処理の�
     "time_column": "timestamp", "group_column": null,
     "folds": [{"n_train": 330, "n_test": 330, "n_unlabeled": 1650}]
   },
-  "hpo": {"sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 100, "n_trials_failed": 0, "timeout": null, "best_trial": 57},
+  "hpo": {
+    "sampler": "TPESampler", "n_trials": 100, "n_trials_completed": 99, "n_trials_failed": 1, "timeout": null, "best_trial": 57,
+    "trials": [
+      {"number": 0, "state": "complete", "value": 0.83, "folds": [0.82, 0.80, 0.86, 0.81, 0.84],
+       "params": {"alpha": 1.2, "k": 30}, "seconds": 3.2, "errors": []},
+      {"number": 1, "state": "fail", "value": null, "folds": [0.80, null, 0.83, 0.79, 0.81],
+       "params": {"alpha": 12.0, "k": 3}, "seconds": 1.1, "errors": [{"fold": 1, "error": "ValueError('...')"}]}
+    ]
+  },
   "best_params": {"alpha": 0.31, "k": 42},
   "cv_scores": {"folds": [0.81, 0.79, 0.84, 0.80, 0.82], "mean": 0.812, "std": 0.017},
   "interpretation": {
@@ -1163,7 +1188,12 @@ uv run mloom predict outputs/ridge/model.pkl data/new.parquet --output outputs/r
 uv run mloom show outputs/ridge/model.pkl
 ```
 
-- `mloom.read_run` を呼び、記録を JSON（`ensure_ascii=False`、`indent=2`）で標準出力に出すだけにする。`> run.json` で、以前の `run.json` と同じ内容のファイルを作れる。
+- `mloom.read_run` を呼び、記録を JSON（`ensure_ascii=False`、`indent=2`）で標準出力に出すだけにする。
+- 既定では、JSON から `hpo.trials`（全試行。「HPO」）のキーを省く（2026-11-27 ユーザー判断。Issue #31）。Skill が記録を読むときの長さを、試行の数によらず保つため。省くのは `mloom.trials.without_trials`。全試行も含めた記録は `mloom.read_run` で読める。
+- `mloom show <model.pkl> --trials`: JSON ではなく、`hpo.trials` を CSV で標準出力に出す（`mloom.trials.trials_csv`。2026-11-27、Issue #31）。
+  - 列の順: `number`・`state`・`value`・`seconds`・`fold_0`〜`fold_<n-1>`・`params.<名前>`（全試行の `params` に出てくる名前を、最初に出てきた順）・`errors`。
+  - `null` と、その試行に無いパラメータは空の欄。`errors` は `fold <番号>: <error>` を `; ` でつないだ 1 つの欄。区切りは `,`、引用符は Python の `csv` の既定（`QUOTE_MINIMAL`）、改行は `\n`。
+  - `hpo` が `null`（refit の記録）か、`hpo` に `trials` が無い記録では、`InputError`（終了コード 2）。空の表を出すと、refit の記録を渡した間違いに気づけないため。
 - pickle を読むので、信頼できる出どころのファイルだけに使う。読めなければ終了コード 2。
 
 再学習（2026-11-26、Issue #16。「ベースのモデル」）:
@@ -1317,6 +1347,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | `mloom.training` | `optimize_model` と refit が共有する処理：行のフィルタ・行の選択・列の除外・CV の分割までの準備（`prepare_training`）と、最終学習と `Result` の組み立て（`fit_final`）。2026-11-26、Issue #16 で `mloom.optimize` から切り出した |
 | `mloom.result` | `Result`（記録とモデルの組み立て）と保存 |
 | `mloom.model_file` | `model.pkl` の形（1 段目の記録、2 段目のモデル）の書き出しと読み込み（`read_run`）。scikit-learn と numpy を import しない |
+| `mloom.trials` | 記録の `hpo.trials` の表示：`mloom show` の JSON から省く（`without_trials`）、CSV の表にする（`trials_csv`）。scikit-learn と numpy を import しない。2026-11-27、Issue #31 |
 | `mloom.dtypes` | 列の型を、フィルタと行のハッシュが比べる値の種類（数値、真偽値、文字列、日時、日付）として読む |
 | `mloom.filters` | 行のフィルタの定義の検査と適用 |
 | `mloom.row_hash` | 学習に使った行の照合用の、値による行のハッシュ |
@@ -1341,7 +1372,7 @@ Skill が引数を作るときの決まり（2026-11-26 Issue #7 で決定）:
 | 8 | 欠損の扱い | **決定**（2026-11-26）: 補完の方式を設定ファイルで選べる。既定は、欠損を扱えるモデル（`lightgbm`、`random_forest`）では補完せず、ほかは中央値。→「前処理」 |
 | 9 | 選べるモデル | 表の 4 つで始める。API から任意の推定器と探索空間を渡せるようにするか |
 | 10 | 予測の入口 | **決定**（2026-11-26）: `mloom predict` の CLI と Python API を用意する。`pickle.load` だけでも予測できるようにする。→「予測」 |
-| 11 | HPO の試行の記録 | 記録は最良の試行だけ。全試行を `trials.csv` に出すか |
+| 11 | HPO の試行の記録 | **決定**（2026-11-27）: 全試行を記録の `hpo.trials` に残す。#18 で出力を `model.pkl` 1 つにしたので、`trials.csv` などの別のファイルには出さない。`mloom show` の既定では省き、`--trials` で CSV の表として出す。→「HPO」「記録の表示」 |
 | 12 | Skill の配布方法 | **決定**（2026-11-26）: 各ベンダーの既定の置き場所に、clone の Skill を指すジャンクションを置く。→「配布と実行」 |
 | 13 | 利用環境への導入 | **決定**（2026-11-26）: 利用側リポジトリとは別に clone し、`uv run --project <clone>` で実行する。→「配布と実行」 |
 | 14 | 並列実行 | Optuna の `n_jobs` やモデルの `n_jobs` を使うか（再現性とのトレードオフ）。今は `lightgbm`・`random_forest` の `n_jobs` を 1 に固定している（「モデル」）。LightGBM を `deterministic=True` で並列にするかも含む |

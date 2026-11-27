@@ -56,6 +56,7 @@ uv run mloom optimize data/sample.parquet --target quality --task regression --m
 
 - `outputs/quality-lgbm/` に `model.pkl` ができます。標準出力の最後の行はそのパスです。
 - 実行の記録（採用した列、除外した列と理由、最良のパラメータ、CV のスコア、ライブラリの版など）は `model.pkl` の中にあり、`mloom show` で JSON に出せます。リダイレクトすれば JSON のファイルにもできます。
+- 探索の全試行（試行ごとのスコア・パラメータ・かかった秒数・失敗した分割のエラー）も記録の `hpo.trials` にあります。長くなるので `mloom show` の既定では省き、`mloom show <model.pkl> --trials` で CSV の表として出します（`refit` の `model.pkl` は探索しないので、終了コード 2 になります）。
 
 ```powershell
 uv run mloom show outputs/quality-lgbm/model.pkl
@@ -187,7 +188,7 @@ result = mloom.optimize_model(
 print(result.cv_scores, result.selected_columns)
 print(result.interpretation)  # 重要度・係数・VIP（「解釈」）
 result.save("outputs/quality-ridge")  # outputs/quality-ridge/model.pkl を返す
-run = mloom.read_run("outputs/quality-ridge/model.pkl")  # 記録の辞書（mloom show と同じ内容）
+run = mloom.read_run("outputs/quality-ridge/model.pkl")  # 記録の辞書（mloom show の内容に、全試行の hpo.trials も入る）
 
 # 再学習（「再学習（refit）」）。ベースの記録だけを読み、探索せずに学習し直す
 base = mloom.load_base("outputs/quality-ridge/model.pkl")
@@ -281,7 +282,7 @@ with open("outputs/quality-lgbm/model.pkl", "rb") as file:
     bundle = pickle.load(file)  # モデル（学習時と同じ版の scikit-learn などが要る）
 ```
 
-- 1 つ目は実行の記録（`mloom show` の出力と同じ辞書）で、Python の基本の型だけでできているので、scikit-learn も numpy も無くても読めます。
+- 1 つ目は実行の記録（`mloom.read_run` と同じ辞書）で、Python の基本の型だけでできているので、scikit-learn も numpy も無くても読めます。
 - 2 つ目はモデルで、`pipeline`、`filters`、`train_filters`、`training_rows`、`shap_background` の辞書です。読むには、学習時と同じ版の scikit-learn・numpy・scipy と、`lightgbm` のモデルなら同じ版の lightgbm が要ります（版は記録の `versions` にあります）。
 
 予測の例:
