@@ -57,8 +57,14 @@ def test_optimize_saves_and_prints_model_pkl(
 
     assert main(["show", str(model_path)]) == EXIT_OK
     shown = capsys.readouterr().out
-    assert json.loads(shown) == run
+    trials = run["hpo"].pop("trials")
+    assert json.loads(shown) == run  # all but hpo.trials
     assert "校正切れ" in shown  # not escaped
+
+    assert main(["show", str(model_path), "--trials"]) == EXIT_OK
+    rows = capsys.readouterr().out.splitlines()
+    assert rows[0].startswith("number,state,value,seconds,fold_0,")
+    assert len(rows) == 1 + len(trials) == 1 + run["hpo"]["n_trials"]
 
 
 @pytest.mark.parametrize("missing", ["--target", "--task", "--model", "--cv"])
@@ -362,6 +368,9 @@ def test_refit_keeps_the_filters_of_the_base_unless_a_file_is_given(
 
     assert main(["show", str(model_path)]) == EXIT_OK
     assert json.loads(capsys.readouterr().out) == run
+    # A refit searches nothing, so it has no trials to show.
+    assert main(["show", str(model_path), "--trials"]) == EXIT_INPUT
+    assert "error: the record has no trials of a search" in capsys.readouterr().err
     predictions = tmp_path / "predictions.parquet"
     assert main(["predict", str(model_path), str(data_path), "--output", str(predictions)]) == EXIT_OK
     assert pl.read_parquet(predictions).height == pl.read_parquet(data_path).height

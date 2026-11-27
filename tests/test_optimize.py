@@ -1,5 +1,6 @@
 """Tests of ``optimize_model`` and of the pipeline it saves."""
 
+import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -534,3 +535,48 @@ def test_same_seed_gives_same_result_with_categorical_columns(
     assert first.selected_columns == second.selected_columns
     assert first.best_params == second.best_params
     assert first.cv_scores == second.cv_scores
+
+
+def test_every_trial_is_recorded(frame: pl.DataFrame, make_config: Callable[..., Config]) -> None:
+    """``hpo.trials`` has every trial in order; the best one agrees with ``best_trial``, ``best_params`` and ``cv_scores``."""
+    run = optimize_model(frame, make_config(n_trials=4)).to_dict()
+    trials = run["hpo"]["trials"]
+    assert [trial["number"] for trial in trials] == [0, 1, 2, 3]
+    assert {trial["state"] for trial in trials} == {"complete"}
+    best = trials[run["hpo"]["best_trial"]]
+    assert best["params"] == run["best_params"]
+    assert best["folds"] == run["cv_scores"]["folds"]
+    assert best["value"] == pytest.approx(run["cv_scores"]["mean"])
+    assert all(trial["seconds"] >= 0 and trial["errors"] == [] for trial in trials)
+
+
+def test_failed_fold_is_recorded_with_its_error(
+    frame: pl.DataFrame, make_config: Callable[..., Config], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trial with a failed fold is recorded as failed, with a null score and the error of that fold, and no NaN."""
+
+    class Broken:
+        def fit(self, *_: object) -> None:
+            raise ValueError("broken fold")
+
+    build = mloom.optimize.build_pipeline
+    calls = iter(range(1_000))
+
+    def break_second_call(*args: Any) -> Any:  # noqa: ANN401 - the arguments and pipeline of build_pipeline
+        # The second call is fold 1 of trial 0.
+        return Broken() if next(calls) == 1 else build(*args)
+
+    monkeypatch.setattr(mloom.optimize, "build_pipeline", break_second_call)
+    with pytest.warns(UserWarning, match="a CV fold failed"):
+        result = optimize_model(frame, make_config(n_trials=3))
+    first = result.to_dict()["hpo"]["trials"][0]
+    assert (first["state"], first["value"]) == ("fail", None)
+    assert first["folds"][1] is None
+    assert None not in (first["folds"][0], first["folds"][2])
+    assert first["errors"] == [{"fold": 1, "error": "ValueError('broken fold')"}]
+    assert result.hpo is not None
+    assert result.hpo["n_trials_failed"] == 1
+    # The record is valid JSON with no NaN, and is saved as it is.
+    record = read_run(result.save(tmp_path))
+    json.dumps(record, allow_nan=False)
+    assert record["hpo"]["trials"][0] == first

@@ -166,6 +166,10 @@ Read that output and report, in the user's language:
 - `filters` and `train_filters` as they were passed, when they are not empty.
 - The settings: `settings.columns`, `settings.preprocessing`, `settings.clip`, `settings.impute`, `settings.selection` and `settings.importance` with `settings.sources` (the file each value came from) and `settings.files` (the files read, with `found`). For clipping, also `preprocessing.clip`: the method, the lower and upper bounds of each column (`bounds`) and the columns not clipped (`unclipped_columns`). For imputation, also `preprocessing.impute.method`: the method the final model used, with `auto` resolved for the model (`settings.impute.method` keeps the value as set, `auto` included).
 - `best_params`, and `hpo.n_trials_failed` when it is not 0. `k` is the number of selected numeric columns; `use:<column>` tells whether the search used the categorical column (`true` for a selected one); `cat_smooth` is the smoothing of LightGBM for the categories, searched only with categorical candidates. Without a numeric candidate, there is no `k` and no `use:`, and every categorical column is used.
+- The trials of the search are left out of the output of `mloom show`. Print them as CSV with `uv run --project "<clone>" mloom show <output>/model.pkl --trials` (one row per trial: `number`, `state`, `value`, `seconds`, `fold_<i>`, `params.<name>`, `errors`; exit code 2 for a refit, which has no search), only in these cases:
+  - `hpo.n_trials_failed` is not 0: read `errors` of the `fail` rows and report the cause of the failed folds.
+  - The user asks how the search went (whether it levelled off, which ranges of the parameters scored well): answer from `value` by `number` and the `params.*` columns.
+  - Never change the number of trials or the settings and run again on your own because of the table (section 4.5).
 - Where `model.pkl` is, and that `mloom predict` predicts with it (section 9). Warn that a pickle must only be loaded from a trusted source.
 
 Do not claim that a score is good or bad without the user's baseline; compare only when the user gives one or asks for several runs.
